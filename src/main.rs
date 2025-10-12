@@ -1,26 +1,9 @@
-#![allow(unused_imports)]
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use codecrafters_redis::run;
 use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
-
-mod parse;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:6379").await?;
 
-    loop {
-        let (mut stream, _) = listener.accept().await?;
-        println!("accepted new connection");
-
-        let _: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-            loop {
-                let mut buffer = [0; 20];
-                stream.read(&mut buffer).await?;
-                println!("read {:?}", buffer);
-
-                stream.write_all(b"+PONG\r\n").await?;
-            }
-        });
-    }
+    run(listener).await
 }

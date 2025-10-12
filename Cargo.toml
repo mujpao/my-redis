@@ -9,3 +9,6 @@ anyhow = "1.0.100"                                   # error handling
 bytes = "1.10.1"                                     # helps manage buffers
 thiserror = "1.0.32"                                # error handling
 tokio = { version = "1.47.1", features = ["full"] } # async networking
+
+[dev-dependencies]
+redis = "0.32.7"
