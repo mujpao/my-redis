@@ -2,6 +2,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
+mod connection;
 mod parse;
 
 pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
