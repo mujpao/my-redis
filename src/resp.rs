@@ -46,11 +46,6 @@ impl RespValue {
                 if *line == *b"-1" {
                     Ok(RespValue::NullBulkString)
                 } else {
-                    let len: usize = str::from_utf8(&line)
-                        .map_err(|e| ParseError::Other(e.into()))?
-                        .parse::<usize>()
-                        .map_err(|e| ParseError::Other(e.into()))?;
-
                     let s = get_line(data)?;
                     Ok(RespValue::BulkString(String::from_utf8(s.to_vec())?))
                 }
@@ -90,7 +85,7 @@ impl RespValue {
     }
 }
 
-fn get_line<'a>(mut data: &mut Cursor<&'a [u8]>) -> Result<&'a [u8], ParseError> {
+fn get_line<'a>(data: &mut Cursor<&'a [u8]>) -> Result<&'a [u8], ParseError> {
     let start = data.position() as usize;
     let crlf_start_index = &data.get_ref()[start..]
         .windows(2)

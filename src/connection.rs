@@ -47,7 +47,7 @@ impl Connection {
                 Ok(Some(value))
             }
             Err(ParseError::Incomplete) => Ok(None),
-            Err(e) => Err(anyhow!("{:?}", e)),
+            Err(ParseError::Other(e)) => Err(anyhow!("failed to parse: {:?}", e)),
         }
     }
 
@@ -60,7 +60,9 @@ impl Connection {
             }
             RespValue::BulkString(s) => {
                 self.stream.write_u8(b'$').await?;
-                self.stream.write_u64(s.len() as u64).await?;
+                self.stream
+                    .write_all(s.len().to_string().as_bytes())
+                    .await?;
                 self.stream.write_all(b"\r\n").await?;
                 self.stream.write_all(s.as_bytes()).await?;
                 self.stream.write_all(b"\r\n").await?;
@@ -80,7 +82,9 @@ impl Connection {
             }
             RespValue::Array(a) => {
                 self.stream.write_u8(b'*').await?;
-                self.stream.write_u64(a.len() as u64).await?;
+                self.stream
+                    .write_all(a.len().to_string().as_bytes())
+                    .await?;
                 self.stream.write_all(b"\r\n").await?;
                 for element in a {
                     Box::pin(self.write_value(element)).await?;
