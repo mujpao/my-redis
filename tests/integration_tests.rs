@@ -72,3 +72,33 @@ async fn handle_echo() {
     let err: Result<String, redis::RedisError> = redis::cmd("echo").query_async(&mut conn).await;
     assert!(err.is_err());
 }
+
+#[tokio::test]
+async fn handle_set_and_get() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let data: String = redis::cmd("SET")
+        .arg("foo")
+        .arg("bar")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute SET");
+    assert_eq!(data, "OK");
+
+    let data: String = redis::cmd("GET")
+        .arg("foo")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute SET");
+    assert_eq!(data, "bar");
+
+    let data: redis::Value = redis::cmd("GET")
+        .arg("keydoesn'texist")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute SET");
+    assert_eq!(data, redis::Value::Nil);
+}

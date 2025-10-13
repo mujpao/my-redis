@@ -68,7 +68,7 @@ impl Connection {
                 self.stream.write_all(b"\r\n").await?;
             }
             RespValue::NullBulkString => {
-                self.stream.write_all(b"$0\r\n\r\n").await?;
+                self.stream.write_all(b"$-1\r\n").await?;
             }
             RespValue::SimpleError(e) => {
                 self.stream.write_u8(b'-').await?;
