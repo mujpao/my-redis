@@ -1,13 +1,14 @@
 use anyhow::anyhow;
-use bytes::{Buf, Bytes};
+use bytes::Buf;
 use std::io::Cursor;
+use std::string::FromUtf8Error;
 
 #[derive(PartialEq, Debug)]
-enum RespValue {
-    SimpleString(Bytes),
-    BulkString(Bytes),
+pub enum RespValue {
+    SimpleString(String),
+    BulkString(String),
     NullBulkString,
-    SimpleError(Bytes),
+    SimpleError(String),
     Integer(i64),
     Array(Vec<RespValue>),
     NullArray,
@@ -19,8 +20,14 @@ pub enum ParseError {
     Other(anyhow::Error),
 }
 
+impl From<FromUtf8Error> for ParseError {
+    fn from(value: FromUtf8Error) -> Self {
+        ParseError::Other(anyhow!("invalid utf8 {:?}", value))
+    }
+}
+
 impl RespValue {
-    fn parse_next(data: &mut Cursor<Bytes>) -> Result<RespValue, ParseError> {
+    pub fn parse_next(data: &mut Cursor<&[u8]>) -> Result<RespValue, ParseError> {
         if !data.has_remaining() {
             return Err(ParseError::Incomplete);
         }
@@ -28,11 +35,11 @@ impl RespValue {
         match data.get_u8() {
             b'+' => {
                 let s = get_line(data)?;
-                Ok(RespValue::SimpleString(s.into()))
+                Ok(RespValue::SimpleString(String::from_utf8(s.to_vec())?))
             }
             b'-' => {
                 let s = get_line(data)?;
-                Ok(RespValue::SimpleError(s.into()))
+                Ok(RespValue::SimpleError(String::from_utf8(s.to_vec())?))
             }
             b'$' => {
                 let line = get_line(data)?;
@@ -45,7 +52,7 @@ impl RespValue {
                         .map_err(|e| ParseError::Other(e.into()))?;
 
                     let s = get_line(data)?;
-                    Ok(RespValue::BulkString(s.into()))
+                    Ok(RespValue::BulkString(String::from_utf8(s.to_vec())?))
                 }
             }
             b':' => {
@@ -83,7 +90,7 @@ impl RespValue {
     }
 }
 
-fn get_line(mut data: &mut Cursor<Bytes>) -> Result<Bytes, ParseError> {
+fn get_line<'a>(mut data: &mut Cursor<&'a [u8]>) -> Result<&'a [u8], ParseError> {
     let start = data.position() as usize;
     let crlf_start_index = &data.get_ref()[start..]
         .windows(2)
@@ -92,15 +99,16 @@ fn get_line(mut data: &mut Cursor<Bytes>) -> Result<Bytes, ParseError> {
         + start;
 
     data.set_position((crlf_start_index + 2) as u64);
-    Ok(data.get_ref().slice(start..crlf_start_index))
+    Ok(&data.get_ref()[start..crlf_start_index])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     fn parse_next(bytes: Bytes) -> Result<RespValue, ParseError> {
-        let mut cursor = Cursor::new(bytes);
+        let mut cursor = Cursor::new(&bytes[..]);
         RespValue::parse_next(&mut cursor)
     }
 

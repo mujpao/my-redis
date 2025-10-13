@@ -1,63 +1,98 @@
-// use bytes::{Buf, BytesMut};
-// use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
-// use tokio::net::TcpStream;
+use crate::resp::{ParseError, RespValue};
+use anyhow::anyhow;
+use bytes::{Buf, BytesMut};
+use std::io::Cursor;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::net::TcpStream;
 
-// struct Connection {
-//     stream: BufWriter<TcpStream>,
-//     buffer: BytesMut,
-// }
+pub struct Connection {
+    stream: BufWriter<TcpStream>,
+    buffer: BytesMut,
+}
 
-// impl Connection {
-//     fn new() -> Self {
-//         Self {
-//             // TODO change size
-//             stream: BufWriter::new(socket),
+impl Connection {
+    pub fn new(stream: TcpStream) -> Self {
+        Self {
+            // TODO change size
+            stream: BufWriter::new(stream),
+            buffer: BytesMut::with_capacity(4 * 1024),
+        }
+    }
 
-//             buffer: BytesMut::with_capacity(4 * 1024),
-//         }
-//     }
+    pub async fn read_value(&mut self) -> anyhow::Result<Option<RespValue>> {
+        loop {
+            if let Some(frame) = self.parse_frame()? {
+                return Ok(Some(frame));
+            }
 
-//     async fn read_value(&mut self) -> anyhow::Result<Option<Frame>> {
-//         loop {
-//             if let Some(frame) = self.parse_frame()? {
-//                 return Ok(Some(frame));
-//             }
+            if 0 == self.stream.read_buf(&mut self.buffer).await? {
+                if self.buffer.is_empty() {
+                    // TODO
+                    return Ok(None);
+                } else {
+                    return Err(anyhow!("connection reset by peer"));
+                }
+            }
+        }
+    }
 
-//             if 0 == self.stream.read_buf(&mut self.buffer).await? {
-//                 if self.buffer.is_empty() {
-//                     return Ok(None);
-//                 } else {
-//                     return Err("connection reset by peer".into());
-//                 }
-//             }
-//         }
-//     }
+    fn parse_frame(&mut self) -> anyhow::Result<Option<RespValue>> {
+        let mut buf = Cursor::new(&self.buffer[..]);
 
-//     fn parse_frame(&mut self) -> crate::Result<Option<Frame>> {
-//         let mut buf = Cursor::new(&self.buffer[..]);
+        match RespValue::parse_next(&mut buf) {
+            Ok(value) => {
+                let len = buf.position() as usize;
+                self.buffer.advance(len);
 
-//         match Frame::check(&mut buf) {
-//             Ok(_) => {
-//                 // Get the byte length of the frame
-//                 let len = buf.position() as usize;
+                Ok(Some(value))
+            }
+            Err(ParseError::Incomplete) => Ok(None),
+            Err(e) => Err(anyhow!("{:?}", e)),
+        }
+    }
 
-//                 // Reset the internal cursor for the
-//                 // call to `parse`.
-//                 buf.set_position(0);
+    pub async fn write_value(&mut self, value: &RespValue) -> tokio::io::Result<()> {
+        match value {
+            RespValue::SimpleString(s) => {
+                self.stream.write_u8(b'+').await?;
+                self.stream.write_all(s.as_bytes()).await?;
+                self.stream.write_all(b"\r\n").await?;
+            }
+            RespValue::BulkString(s) => {
+                self.stream.write_u8(b'$').await?;
+                self.stream.write_u64(s.len() as u64).await?;
+                self.stream.write_all(b"\r\n").await?;
+                self.stream.write_all(s.as_bytes()).await?;
+                self.stream.write_all(b"\r\n").await?;
+            }
+            RespValue::NullBulkString => {
+                self.stream.write_all(b"$0\r\n\r\n").await?;
+            }
+            RespValue::SimpleError(e) => {
+                self.stream.write_u8(b'-').await?;
+                self.stream.write_all(e.as_bytes()).await?;
+                self.stream.write_all(b"\r\n").await?;
+            }
+            RespValue::Integer(i) => {
+                self.stream.write_u8(b':').await?;
+                self.stream.write_i64(*i).await?;
+                self.stream.write_all(b"\r\n").await?;
+            }
+            RespValue::Array(a) => {
+                self.stream.write_u8(b'*').await?;
+                self.stream.write_u64(a.len() as u64).await?;
+                self.stream.write_all(b"\r\n").await?;
+                for element in a {
+                    Box::pin(self.write_value(element)).await?;
+                }
+            }
+            RespValue::NullArray => {
+                self.stream.write_all(b"*-1\r\n").await?;
+            }
+        }
 
-//                 // Parse the frame
-//                 let frame = Frame::parse(&mut buf)?;
+        self.stream.flush().await?;
 
-//                 // Discard the frame from the buffer
-//                 self.buffer.advance(len);
-
-//                 // Return the frame to the caller.
-//                 Ok(Some(frame))
-//             }
-//             // Not enough data has been buffered
-//             Err(Incomplete) => Ok(None),
-//             // An error was encountered
-//             Err(e) => Err(e.into()),
-//         }
-//     }
-// }
+        Ok(())
+    }
+}
