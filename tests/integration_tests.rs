@@ -1,5 +1,7 @@
 use codecrafters_redis::run;
+use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio::time::sleep;
 
 async fn setup() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -92,13 +94,132 @@ async fn handle_set_and_get() {
         .arg("foo")
         .query_async(&mut conn)
         .await
-        .expect("failed to execute SET");
+        .expect("failed to execute GET");
     assert_eq!(data, "bar");
 
     let data: redis::Value = redis::cmd("GET")
         .arg("keydoesn'texist")
         .query_async(&mut conn)
         .await
-        .expect("failed to execute SET");
+        .expect("failed to execute GET");
     assert_eq!(data, redis::Value::Nil);
+}
+
+#[tokio::test]
+async fn handle_set_with_expiry() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let client2 = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn2 = client2.get_multiplexed_async_connection().await.unwrap();
+
+    let handle = tokio::spawn(async move {
+        let data: String = redis::cmd("SET")
+            .arg("mykey1")
+            .arg("myvalue")
+            .arg("px")
+            .arg(100)
+            .query_async(&mut conn2)
+            .await
+            .expect("failed to execute SET");
+        assert_eq!(data, "OK");
+
+        let data: String = redis::cmd("GET")
+            .arg("mykey1")
+            .query_async(&mut conn2)
+            .await
+            .expect("failed to execute GET");
+        assert_eq!(data, "myvalue");
+
+        sleep(Duration::from_millis(100)).await;
+
+        let data: redis::Value = redis::cmd("GET")
+            .arg("mykey1")
+            .query_async(&mut conn2)
+            .await
+            .expect("failed to execute GET");
+        assert_eq!(data, redis::Value::Nil);
+
+        let data: String = redis::cmd("SET")
+            .arg("foo1")
+            .arg("bar")
+            .arg("ex")
+            .arg(1)
+            .query_async(&mut conn2)
+            .await
+            .expect("failed to execute SET");
+        assert_eq!(data, "OK");
+
+        let data: String = redis::cmd("GET")
+            .arg("foo1")
+            .query_async(&mut conn2)
+            .await
+            .expect("failed to execute GET");
+        assert_eq!(data, "bar");
+
+        sleep(Duration::from_secs(1)).await;
+
+        let data: redis::Value = redis::cmd("GET")
+            .arg("foo1")
+            .query_async(&mut conn2)
+            .await
+            .expect("failed to execute GET");
+        assert_eq!(data, redis::Value::Nil);
+    });
+
+    let data: String = redis::cmd("SET")
+        .arg("foo")
+        .arg("bar")
+        .arg("EX")
+        .arg(1)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute SET");
+    assert_eq!(data, "OK");
+
+    let data: String = redis::cmd("GET")
+        .arg("foo")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute GET");
+    assert_eq!(data, "bar");
+
+    sleep(Duration::from_secs(1)).await;
+
+    let data: redis::Value = redis::cmd("GET")
+        .arg("foo")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute GET");
+    assert_eq!(data, redis::Value::Nil);
+
+    let data: String = redis::cmd("SET")
+        .arg("mykey")
+        .arg("myvalue")
+        .arg("PX")
+        .arg(100)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute SET");
+    assert_eq!(data, "OK");
+
+    let data: String = redis::cmd("GET")
+        .arg("mykey")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute GET");
+    assert_eq!(data, "myvalue");
+
+    sleep(Duration::from_millis(100)).await;
+
+    let data: redis::Value = redis::cmd("GET")
+        .arg("mykey")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute GET");
+    assert_eq!(data, redis::Value::Nil);
+
+    handle.await.unwrap();
 }

@@ -3,14 +3,17 @@ use anyhow::anyhow;
 use connection::Connection;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+use tokio::time::sleep;
 
 mod connection;
 mod resp;
 
 pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
-    let map: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let map: Arc<Mutex<HashMap<String, (String, Option<Instant>)>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     loop {
         let map2 = Arc::clone(&map);
         let (stream, _) = listener.accept().await?;
@@ -21,7 +24,6 @@ pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
             loop {
                 let value = connection.read_value().await;
 
-                // println!("value: {:?}", value);
                 if let Some(value) = value? {
                     println!("read {:?}", value);
 
@@ -34,11 +36,46 @@ pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
                             let to_send = RespValue::BulkString(s);
                             connection.write_value(&to_send).await?;
                         }
-                        Ok(Command::Set { key, value }) => {
+                        Ok(Command::Set {
+                            key,
+                            value,
+                            expiry_duration,
+                        }) => {
+                            let expiry_time = if let Some(duration) = expiry_duration {
+                                Some(Instant::now() + duration)
+                            } else {
+                                None
+                            };
                             {
                                 let mut map_guard =
                                     map2.lock().map_err(|_| anyhow!("unable to lock map"))?;
-                                map_guard.insert(key.to_string(), value.to_string());
+                                map_guard.insert(key.to_string(), (value.to_string(), expiry_time));
+                            }
+
+                            if let Some(duration) = expiry_duration {
+                                let map = Arc::clone(&map2);
+                                tokio::spawn(async move {
+                                    sleep(duration).await;
+
+                                    {
+                                        let mut map_guard = map
+                                            .lock()
+                                            .map_err(|_| anyhow!("unable to lock map"))?;
+                                        map_guard.insert(
+                                            key.to_string(),
+                                            (value.to_string(), expiry_time),
+                                        );
+
+                                        if let Some((_, Some(key_expires_at))) = map_guard.get(&key)
+                                        {
+                                            if *key_expires_at < Instant::now() {
+                                                map_guard.remove(&key);
+                                            }
+                                        }
+                                    }
+
+                                    Ok::<(), anyhow::Error>(())
+                                });
                             }
 
                             let to_send = RespValue::SimpleString(String::from("OK"));
@@ -49,7 +86,7 @@ pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
                                 let map_guard =
                                     map2.lock().map_err(|_| anyhow!("unable to lock map"))?;
                                 match map_guard.get(&key) {
-                                    Some(value) => RespValue::BulkString(value.clone()),
+                                    Some((value, _)) => RespValue::BulkString(value.clone()),
                                     None => RespValue::NullBulkString,
                                 }
                             };
@@ -71,8 +108,14 @@ pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
 enum Command {
     Ping,
     Echo(String),
-    Set { key: String, value: String },
-    Get { key: String },
+    Set {
+        key: String,
+        value: String,
+        expiry_duration: Option<Duration>,
+    },
+    Get {
+        key: String,
+    },
 }
 
 #[derive(Debug)]
@@ -127,18 +170,55 @@ impl TryFrom<RespValue> for Command {
                                 println!("invalid command {:?}", resp_value);
                                 return Err(CommandError::WrongNumberArguments);
                             }
-                            match (&data[1], &data[2]) {
+                            let mut command = match (&data[1], &data[2]) {
                                 (RespValue::BulkString(key), RespValue::BulkString(value)) => {
-                                    Ok(Command::Set {
+                                    Command::Set {
                                         key: key.to_string(),
                                         value: value.to_string(),
-                                    })
+                                        expiry_duration: None,
+                                    }
                                 }
                                 (_, _) => {
                                     println!("invalid command {:?}", resp_value);
-                                    Err(CommandError::InvalidArgument)
+                                    return Err(CommandError::InvalidArgument);
+                                }
+                            };
+
+                            if data.len() == 5 {
+                                match (&data[3], &data[4]) {
+                                    (RespValue::BulkString(s), RespValue::BulkString(i)) => {
+                                        let i: u64 = i.parse().map_err(|e| {
+                                            println!("error parsing integer: {:?}", e);
+                                            CommandError::InvalidArgument
+                                        })?;
+
+                                        let units = s.as_str().to_uppercase();
+                                        println!("{}", units);
+                                        let duration = match units.as_str() {
+                                            "EX" => Duration::from_secs(i),
+                                            "PX" => Duration::from_millis(i),
+                                            _ => {
+                                                return Err(CommandError::InvalidArgument);
+                                            }
+                                        };
+
+                                        command = if let Command::Set { key, value, .. } = command {
+                                            Command::Set {
+                                                key,
+                                                value,
+                                                expiry_duration: Some(duration),
+                                            }
+                                        } else {
+                                            return Err(CommandError::InvalidArgument);
+                                        };
+                                    }
+                                    (_, _) => {
+                                        println!("invalid command {:?}", resp_value);
+                                        return Err(CommandError::InvalidArgument);
+                                    }
                                 }
                             }
+                            Ok(command)
                         }
                         "GET" => {
                             if data.len() < 2 {
