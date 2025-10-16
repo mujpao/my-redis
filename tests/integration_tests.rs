@@ -246,4 +246,23 @@ async fn rpush_works() {
         .await
         .expect("failed to execute RPUSH");
     assert_eq!(data, 2);
+
+    let data: i64 = redis::cmd("RPUSH")
+        .arg("another_list")
+        .arg("bar")
+        .arg("baz")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute RPUSH");
+    assert_eq!(data, 2);
+
+    let data: i64 = redis::cmd("RPUSH")
+        .arg("another_list")
+        .arg("foo")
+        .arg("bar")
+        .arg("baz")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute RPUSH");
+    assert_eq!(data, 5);
 }

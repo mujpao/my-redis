@@ -97,14 +97,14 @@ pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
 
                             connection.write_value(&response).await?;
                         }
-                        Ok(Command::RPush { key, element }) => {
+                        Ok(Command::RPush { key, elements }) => {
                             let len = {
                                 let mut lists_guard =
                                     lists2.lock().map_err(|_| anyhow!("unable to lock lists"))?;
                                 let list = lists_guard
                                     .entry(key.to_string())
                                     .or_insert_with(|| VecDeque::new());
-                                list.push_back(element);
+                                list.extend(elements);
 
                                 list.len()
                             };
@@ -138,7 +138,7 @@ enum Command {
     },
     RPush {
         key: String,
-        element: RespValue,
+        elements: Vec<RespValue>,
     },
 }
 
@@ -259,7 +259,7 @@ impl TryFrom<RespValue> for Command {
                             }
                         }
                         "RPUSH" => {
-                            if data.len() != 3 {
+                            if data.len() < 3 {
                                 println!("invalid command {:?}", resp_value);
                                 return Err(CommandError::WrongNumberArguments);
                             }
@@ -267,7 +267,7 @@ impl TryFrom<RespValue> for Command {
                             match &data[1] {
                                 RespValue::BulkString(key) => Ok(Command::RPush {
                                     key: key.to_string(),
-                                    element: data[2].clone(),
+                                    elements: data[2..].to_vec(),
                                 }),
                                 _ => {
                                     println!("invalid command {:?}", resp_value);
