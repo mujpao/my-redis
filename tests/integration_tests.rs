@@ -223,3 +223,27 @@ async fn handle_set_with_expiry() {
 
     handle.await.unwrap();
 }
+
+#[tokio::test]
+async fn rpush_works() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let data: i64 = redis::cmd("RPUSH")
+        .arg("mylist")
+        .arg("hello")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute RPUSH");
+    assert_eq!(data, 1);
+
+    let data: i64 = redis::cmd("RPUSH")
+        .arg("mylist")
+        .arg("world")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute RPUSH");
+    assert_eq!(data, 2);
+}

@@ -1,7 +1,7 @@
 use crate::resp::RespValue;
 use anyhow::anyhow;
 use connection::Connection;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -14,8 +14,12 @@ mod resp;
 pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
     let map: Arc<Mutex<HashMap<String, (String, Option<Instant>)>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let lists: Arc<Mutex<HashMap<String, VecDeque<RespValue>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
     loop {
         let map2 = Arc::clone(&map);
+        let lists2 = Arc::clone(&lists);
         let (stream, _) = listener.accept().await?;
         println!("accepted new connection");
 
@@ -93,6 +97,22 @@ pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
 
                             connection.write_value(&response).await?;
                         }
+                        Ok(Command::RPush { key, element }) => {
+                            let len = {
+                                let mut lists_guard =
+                                    lists2.lock().map_err(|_| anyhow!("unable to lock lists"))?;
+                                let list = lists_guard
+                                    .entry(key.to_string())
+                                    .or_insert_with(|| VecDeque::new());
+                                list.push_back(element);
+
+                                list.len()
+                            };
+
+                            connection
+                                .write_value(&RespValue::Integer(len as i64))
+                                .await?;
+                        }
                         Err(e) => {
                             let s = format!("{}", e);
                             let to_send = RespValue::SimpleError(s);
@@ -115,6 +135,10 @@ enum Command {
     },
     Get {
         key: String,
+    },
+    RPush {
+        key: String,
+        element: RespValue,
     },
 }
 
@@ -193,7 +217,6 @@ impl TryFrom<RespValue> for Command {
                                         })?;
 
                                         let units = s.as_str().to_uppercase();
-                                        println!("{}", units);
                                         let duration = match units.as_str() {
                                             "EX" => Duration::from_secs(i),
                                             "PX" => Duration::from_millis(i),
@@ -228,6 +251,23 @@ impl TryFrom<RespValue> for Command {
                             match &data[1] {
                                 RespValue::BulkString(key) => Ok(Command::Get {
                                     key: key.to_string(),
+                                }),
+                                _ => {
+                                    println!("invalid command {:?}", resp_value);
+                                    Err(CommandError::InvalidArgument)
+                                }
+                            }
+                        }
+                        "RPUSH" => {
+                            if data.len() != 3 {
+                                println!("invalid command {:?}", resp_value);
+                                return Err(CommandError::WrongNumberArguments);
+                            }
+
+                            match &data[1] {
+                                RespValue::BulkString(key) => Ok(Command::RPush {
+                                    key: key.to_string(),
+                                    element: data[2].clone(),
                                 }),
                                 _ => {
                                     println!("invalid command {:?}", resp_value);

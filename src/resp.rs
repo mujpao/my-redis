@@ -3,7 +3,7 @@ use bytes::Buf;
 use std::io::Cursor;
 use std::string::FromUtf8Error;
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub enum RespValue {
     SimpleString(String),
     BulkString(String),

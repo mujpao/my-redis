@@ -77,7 +77,7 @@ impl Connection {
             }
             RespValue::Integer(i) => {
                 self.stream.write_u8(b':').await?;
-                self.stream.write_i64(*i).await?;
+                self.stream.write_all(i.to_string().as_bytes()).await?;
                 self.stream.write_all(b"\r\n").await?;
             }
             RespValue::Array(a) => {
