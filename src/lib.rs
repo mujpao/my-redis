@@ -121,26 +121,20 @@ pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
                             let value = {
                                 let lists_guard =
                                     lists2.lock().map_err(|_| anyhow!("unable to lock lists"))?;
-                                if let Some(entry) = lists_guard.get(&key) {
-                                    if start >= entry.len() || start > stop {
-                                        Some(Vec::<RespValue>::new())
-                                    } else {
-                                        stop = std::cmp::min(stop + 1, entry.len());
-                                        Some(entry.range(start..stop).cloned().collect::<Vec<_>>())
+                                match lists_guard.get(&key) {
+                                    Some(entry) => {
+                                        if start >= entry.len() || start > stop {
+                                            Vec::<RespValue>::new()
+                                        } else {
+                                            stop = std::cmp::min(stop + 1, entry.len());
+                                            entry.range(start..stop).cloned().collect::<Vec<_>>()
+                                        }
                                     }
-                                } else {
-                                    None
+                                    _ => Vec::<RespValue>::new(),
                                 }
                             };
 
-                            match value {
-                                Some(result) => {
-                                    connection.write_value(&RespValue::Array(result)).await?;
-                                }
-                                None => {
-                                    connection.write_value(&RespValue::NullArray).await?;
-                                }
-                            }
+                            connection.write_value(&RespValue::Array(value)).await?;
                         }
                         Err(e) => {
                             let s = format!("{}", e);

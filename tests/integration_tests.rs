@@ -331,12 +331,12 @@ async fn lrange_works() {
         .expect("failed to execute LRANGE");
     assert_eq!(result, Vec::<String>::new());
 
-    let result: redis::Value = redis::cmd("LRANGE")
+    let result: Vec<String> = redis::cmd("LRANGE")
         .arg("arraydoesn'texist")
         .arg(3)
         .arg(2)
         .query_async(&mut conn)
         .await
         .expect("failed to execute LRANGE");
-    assert_eq!(result, redis::Value::Nil);
+    assert_eq!(result, Vec::<String>::new());
 }
