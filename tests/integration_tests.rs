@@ -266,3 +266,77 @@ async fn rpush_works() {
         .expect("failed to execute RPUSH");
     assert_eq!(data, 5);
 }
+
+#[tokio::test]
+async fn lrange_works() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let data: i64 = redis::cmd("RPUSH")
+        .arg("list_key")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .arg("d")
+        .arg("e")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute RPUSH");
+    assert_eq!(data, 5);
+
+    let result: Vec<String> = redis::cmd("LRANGE")
+        .arg("list_key")
+        .arg(0)
+        .arg(1)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LRANGE");
+    assert_eq!(result, vec!["a", "b"]);
+
+    let result: Vec<String> = redis::cmd("LRANGE")
+        .arg("list_key")
+        .arg(2)
+        .arg(4)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LRANGE");
+    assert_eq!(result, vec!["c", "d", "e"]);
+
+    let result: Vec<String> = redis::cmd("LRANGE")
+        .arg("list_key")
+        .arg(5)
+        .arg(6)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LRANGE");
+    assert_eq!(result, Vec::<String>::new());
+
+    let result: Vec<String> = redis::cmd("LRANGE")
+        .arg("list_key")
+        .arg(2)
+        .arg(6)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LRANGE");
+    assert_eq!(result, vec!["c", "d", "e"]);
+
+    let result: Vec<String> = redis::cmd("LRANGE")
+        .arg("list_key")
+        .arg(3)
+        .arg(2)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LRANGE");
+    assert_eq!(result, Vec::<String>::new());
+
+    let result: redis::Value = redis::cmd("LRANGE")
+        .arg("arraydoesn'texist")
+        .arg(3)
+        .arg(2)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LRANGE");
+    assert_eq!(result, redis::Value::Nil);
+}

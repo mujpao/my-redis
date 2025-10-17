@@ -113,6 +113,35 @@ pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
                                 .write_value(&RespValue::Integer(len as i64))
                                 .await?;
                         }
+                        Ok(Command::LPush {
+                            key,
+                            start,
+                            mut stop,
+                        }) => {
+                            let value = {
+                                let lists_guard =
+                                    lists2.lock().map_err(|_| anyhow!("unable to lock lists"))?;
+                                if let Some(entry) = lists_guard.get(&key) {
+                                    if start >= entry.len() || start > stop {
+                                        Some(Vec::<RespValue>::new())
+                                    } else {
+                                        stop = std::cmp::min(stop + 1, entry.len());
+                                        Some(entry.range(start..stop).cloned().collect::<Vec<_>>())
+                                    }
+                                } else {
+                                    None
+                                }
+                            };
+
+                            match value {
+                                Some(result) => {
+                                    connection.write_value(&RespValue::Array(result)).await?;
+                                }
+                                None => {
+                                    connection.write_value(&RespValue::NullArray).await?;
+                                }
+                            }
+                        }
                         Err(e) => {
                             let s = format!("{}", e);
                             let to_send = RespValue::SimpleError(s);
@@ -139,6 +168,11 @@ enum Command {
     RPush {
         key: String,
         elements: Vec<RespValue>,
+    },
+    LPush {
+        key: String,
+        start: usize,
+        stop: usize,
     },
 }
 
@@ -269,6 +303,40 @@ impl TryFrom<RespValue> for Command {
                                     key: key.to_string(),
                                     elements: data[2..].to_vec(),
                                 }),
+                                _ => {
+                                    println!("invalid command {:?}", resp_value);
+                                    Err(CommandError::InvalidArgument)
+                                }
+                            }
+                        }
+                        "LRANGE" => {
+                            if data.len() != 4 {
+                                println!("invalid command {:?}", resp_value);
+                                return Err(CommandError::WrongNumberArguments);
+                            }
+
+                            match (&data[1], &data[2], &data[3]) {
+                                (
+                                    RespValue::BulkString(key),
+                                    RespValue::BulkString(start),
+                                    RespValue::BulkString(stop),
+                                ) => {
+                                    let start: usize = start.parse().map_err(|e| {
+                                        println!("error parsing integer: {:?}", e);
+                                        CommandError::InvalidArgument
+                                    })?;
+
+                                    let stop: usize = stop.parse().map_err(|e| {
+                                        println!("error parsing integer: {:?}", e);
+                                        CommandError::InvalidArgument
+                                    })?;
+
+                                    Ok(Command::LPush {
+                                        key: key.to_string(),
+                                        start,
+                                        stop,
+                                    })
+                                }
                                 _ => {
                                     println!("invalid command {:?}", resp_value);
                                     Err(CommandError::InvalidArgument)
