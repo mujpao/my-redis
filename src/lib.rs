@@ -113,16 +113,24 @@ pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
                                 .write_value(&RespValue::Integer(len as i64))
                                 .await?;
                         }
-                        Ok(Command::LPush {
-                            key,
-                            start,
-                            mut stop,
-                        }) => {
+                        Ok(Command::LRange { key, start, stop }) => {
                             let value = {
                                 let lists_guard =
                                     lists2.lock().map_err(|_| anyhow!("unable to lock lists"))?;
                                 match lists_guard.get(&key) {
                                     Some(entry) => {
+                                        let start: usize = if start < 0 {
+                                            std::cmp::max(start + entry.len() as i64, 0) as usize
+                                        } else {
+                                            start as usize
+                                        };
+
+                                        let mut stop: usize = if stop < 0 {
+                                            std::cmp::max(stop + entry.len() as i64, 0) as usize
+                                        } else {
+                                            stop as usize
+                                        };
+
                                         if start >= entry.len() || start > stop {
                                             Vec::<RespValue>::new()
                                         } else {
@@ -163,10 +171,10 @@ enum Command {
         key: String,
         elements: Vec<RespValue>,
     },
-    LPush {
+    LRange {
         key: String,
-        start: usize,
-        stop: usize,
+        start: i64,
+        stop: i64,
     },
 }
 
@@ -315,17 +323,17 @@ impl TryFrom<RespValue> for Command {
                                     RespValue::BulkString(start),
                                     RespValue::BulkString(stop),
                                 ) => {
-                                    let start: usize = start.parse().map_err(|e| {
+                                    let start: i64 = start.parse().map_err(|e| {
                                         println!("error parsing integer: {:?}", e);
                                         CommandError::InvalidArgument
                                     })?;
 
-                                    let stop: usize = stop.parse().map_err(|e| {
+                                    let stop: i64 = stop.parse().map_err(|e| {
                                         println!("error parsing integer: {:?}", e);
                                         CommandError::InvalidArgument
                                     })?;
 
-                                    Ok(Command::LPush {
+                                    Ok(Command::LRange {
                                         key: key.to_string(),
                                         start,
                                         stop,

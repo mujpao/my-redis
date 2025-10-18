@@ -339,4 +339,40 @@ async fn lrange_works() {
         .await
         .expect("failed to execute LRANGE");
     assert_eq!(result, Vec::<String>::new());
+
+    let result: Vec<String> = redis::cmd("LRANGE")
+        .arg("list_key")
+        .arg(-2)
+        .arg(-1)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LRANGE");
+    assert_eq!(result, vec!["d", "e"]);
+
+    let result: Vec<String> = redis::cmd("LRANGE")
+        .arg("list_key")
+        .arg(0)
+        .arg(-3)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LRANGE");
+    assert_eq!(result, vec!["a", "b", "c"]);
+
+    let result: Vec<String> = redis::cmd("LRANGE")
+        .arg("list_key")
+        .arg(-6)
+        .arg(-3)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LRANGE");
+    assert_eq!(result, vec!["a", "b", "c"]);
+
+    let result: Vec<String> = redis::cmd("LRANGE")
+        .arg("list_key")
+        .arg(-6)
+        .arg(-6)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LRANGE");
+    assert_eq!(result, vec!["a"]);
 }
