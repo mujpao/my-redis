@@ -115,6 +115,24 @@ pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
                                 .write_value(&RespValue::Integer(len as i64))
                                 .await?;
                         }
+                        Ok(Command::LPush { key, elements }) => {
+                            let len = {
+                                let mut lists_guard =
+                                    lists2.lock().map_err(|_| anyhow!("unable to lock lists"))?;
+                                let list = lists_guard
+                                    .entry(key.to_string())
+                                    .or_insert_with(|| VecDeque::new());
+                                for elem in elements {
+                                    list.push_front(elem);
+                                }
+
+                                list.len()
+                            };
+
+                            connection
+                                .write_value(&RespValue::Integer(len as i64))
+                                .await?;
+                        }
                         Ok(Command::LRange { key, start, stop }) => {
                             let value = {
                                 let lists_guard =

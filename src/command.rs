@@ -16,6 +16,10 @@ pub enum Command {
         key: String,
         elements: Vec<RespValue>,
     },
+    LPush {
+        key: String,
+        elements: Vec<RespValue>,
+    },
     LRange {
         key: String,
         start: i64,
@@ -147,6 +151,23 @@ impl TryFrom<RespValue> for Command {
 
                             match &data[1] {
                                 RespValue::BulkString(key) => Ok(Command::RPush {
+                                    key: key.to_string(),
+                                    elements: data[2..].to_vec(),
+                                }),
+                                _ => {
+                                    println!("invalid command {:?}", resp_value);
+                                    Err(ParseCommandError::InvalidArgument)
+                                }
+                            }
+                        }
+                        "LPUSH" => {
+                            if data.len() < 3 {
+                                println!("invalid command {:?}", resp_value);
+                                return Err(ParseCommandError::WrongNumberArguments);
+                            }
+
+                            match &data[1] {
+                                RespValue::BulkString(key) => Ok(Command::LPush {
                                     key: key.to_string(),
                                     elements: data[2..].to_vec(),
                                 }),
