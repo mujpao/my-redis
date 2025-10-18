@@ -463,3 +463,109 @@ async fn lpush_works() {
         .expect("failed to execute LLEN");
     assert_eq!(data, 5);
 }
+
+#[tokio::test]
+async fn lpop_works() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let data: redis::Value = redis::cmd("LPOP")
+        .arg("mylist")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LPOP");
+    assert_eq!(data, redis::Value::Nil);
+
+    let data: i64 = redis::cmd("RPUSH")
+        .arg("mylist")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .arg("d")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute RPUSH");
+    assert_eq!(data, 4);
+
+    let data: String = redis::cmd("LPOP")
+        .arg("mylist")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LPOP");
+    assert_eq!(data, "a");
+
+    let result: Vec<String> = redis::cmd("LRANGE")
+        .arg("mylist")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LRANGE");
+    assert_eq!(result, vec!["b", "c", "d"]);
+
+    let data: String = redis::cmd("LPOP")
+        .arg("mylist")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LPOP");
+    assert_eq!(data, "b");
+
+    let result: Vec<String> = redis::cmd("LRANGE")
+        .arg("mylist")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LRANGE");
+    assert_eq!(result, vec!["c", "d"]);
+
+    let data: String = redis::cmd("LPOP")
+        .arg("mylist")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LPOP");
+    assert_eq!(data, "c");
+
+    let result: Vec<String> = redis::cmd("LRANGE")
+        .arg("mylist")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LRANGE");
+    assert_eq!(result, vec!["d"]);
+
+    let data: String = redis::cmd("LPOP")
+        .arg("mylist")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LPOP");
+    assert_eq!(data, "d");
+
+    let result: Vec<String> = redis::cmd("LRANGE")
+        .arg("mylist")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LRANGE");
+    assert_eq!(result, Vec::<String>::new());
+
+    let data: redis::Value = redis::cmd("LPOP")
+        .arg("mylist")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LPOP");
+    assert_eq!(data, redis::Value::Nil);
+
+    let result: Vec<String> = redis::cmd("LRANGE")
+        .arg("mylist")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LRANGE");
+    assert_eq!(result, Vec::<String>::new());
+}

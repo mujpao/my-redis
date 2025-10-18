@@ -20,6 +20,9 @@ pub enum Command {
         key: String,
         elements: Vec<RespValue>,
     },
+    LPop {
+        key: String,
+    },
     LRange {
         key: String,
         start: i64,
@@ -221,6 +224,21 @@ impl TryFrom<RespValue> for Command {
                             }
                             match &data[1] {
                                 RespValue::BulkString(key) => Ok(Command::LLen {
+                                    key: key.to_string(),
+                                }),
+                                _ => {
+                                    println!("invalid command {:?}", resp_value);
+                                    Err(ParseCommandError::InvalidArgument)
+                                }
+                            }
+                        }
+                        "LPOP" => {
+                            if data.len() != 2 {
+                                println!("invalid command {:?}", resp_value);
+                                return Err(ParseCommandError::WrongNumberArguments);
+                            }
+                            match &data[1] {
+                                RespValue::BulkString(key) => Ok(Command::LPop {
                                     key: key.to_string(),
                                 }),
                                 _ => {

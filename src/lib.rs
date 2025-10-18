@@ -176,6 +176,21 @@ pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
 
                             connection.write_value(&response).await?;
                         }
+                        Ok(Command::LPop { key }) => {
+                            let response = {
+                                let mut lists_guard =
+                                    lists2.lock().map_err(|_| anyhow!("unable to lock map"))?;
+                                match lists_guard.get_mut(&key) {
+                                    Some(list) => match list.pop_front() {
+                                        Some(elem) => elem,
+                                        None => RespValue::NullBulkString,
+                                    },
+                                    None => RespValue::NullBulkString,
+                                }
+                            };
+
+                            connection.write_value(&response).await?;
+                        }
                         Err(e) => {
                             let s = format!("{}", e);
                             let to_send = RespValue::SimpleError(s);
