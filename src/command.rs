@@ -25,6 +25,9 @@ pub enum Command {
         start: i64,
         stop: i64,
     },
+    LLen {
+        key: String,
+    },
 }
 
 #[derive(Debug)]
@@ -205,6 +208,21 @@ impl TryFrom<RespValue> for Command {
                                         stop,
                                     })
                                 }
+                                _ => {
+                                    println!("invalid command {:?}", resp_value);
+                                    Err(ParseCommandError::InvalidArgument)
+                                }
+                            }
+                        }
+                        "LLEN" => {
+                            if data.len() != 2 {
+                                println!("invalid command {:?}", resp_value);
+                                return Err(ParseCommandError::WrongNumberArguments);
+                            }
+                            match &data[1] {
+                                RespValue::BulkString(key) => Ok(Command::LLen {
+                                    key: key.to_string(),
+                                }),
                                 _ => {
                                     println!("invalid command {:?}", resp_value);
                                     Err(ParseCommandError::InvalidArgument)

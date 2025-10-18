@@ -231,12 +231,26 @@ async fn rpush_works() {
     let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
     let mut conn = client.get_multiplexed_async_connection().await.unwrap();
 
+    let data: i64 = redis::cmd("LLEN")
+        .arg("mylist")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LLEN");
+    assert_eq!(data, 0);
+
     let data: i64 = redis::cmd("RPUSH")
         .arg("mylist")
         .arg("hello")
         .query_async(&mut conn)
         .await
         .expect("failed to execute RPUSH");
+    assert_eq!(data, 1);
+
+    let data: i64 = redis::cmd("LLEN")
+        .arg("mylist")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LLEN");
     assert_eq!(data, 1);
 
     let data: i64 = redis::cmd("RPUSH")
@@ -247,6 +261,13 @@ async fn rpush_works() {
         .expect("failed to execute RPUSH");
     assert_eq!(data, 2);
 
+    let data: i64 = redis::cmd("LLEN")
+        .arg("mylist")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LLEN");
+    assert_eq!(data, 2);
+
     let data: i64 = redis::cmd("RPUSH")
         .arg("another_list")
         .arg("bar")
@@ -254,6 +275,13 @@ async fn rpush_works() {
         .query_async(&mut conn)
         .await
         .expect("failed to execute RPUSH");
+    assert_eq!(data, 2);
+
+    let data: i64 = redis::cmd("LLEN")
+        .arg("another_list")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LLEN");
     assert_eq!(data, 2);
 
     let data: i64 = redis::cmd("RPUSH")
@@ -264,6 +292,13 @@ async fn rpush_works() {
         .query_async(&mut conn)
         .await
         .expect("failed to execute RPUSH");
+    assert_eq!(data, 5);
+
+    let data: i64 = redis::cmd("LLEN")
+        .arg("another_list")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LLEN");
     assert_eq!(data, 5);
 }
 
@@ -420,4 +455,11 @@ async fn lpush_works() {
         .await
         .expect("failed to execute LRANGE");
     assert_eq!(result, vec!["e", "d", "c", "b", "a"]);
+
+    let data: i64 = redis::cmd("LLEN")
+        .arg("list_key")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LLEN");
+    assert_eq!(data, 5);
 }

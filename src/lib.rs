@@ -164,6 +164,18 @@ pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
 
                             connection.write_value(&RespValue::Array(value)).await?;
                         }
+                        Ok(Command::LLen { key }) => {
+                            let response = {
+                                let lists_guard =
+                                    lists2.lock().map_err(|_| anyhow!("unable to lock map"))?;
+                                match lists_guard.get(&key) {
+                                    Some(list) => RespValue::Integer(list.len() as i64),
+                                    None => RespValue::Integer(0),
+                                }
+                            };
+
+                            connection.write_value(&response).await?;
+                        }
                         Err(e) => {
                             let s = format!("{}", e);
                             let to_send = RespValue::SimpleError(s);
