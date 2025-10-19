@@ -3,7 +3,7 @@ use crate::connection::Connection;
 use crate::resp::RespValue;
 use anyhow::anyhow;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -208,23 +208,50 @@ async fn handle_command(
 
             connection.write_value(&response).await?;
         }
-        Command::LPop { key } => {
-            let response = {
-                let mut lists_guard = app
-                    .lists
+        Command::LPop { key, count } => {
+            let response = lpop(
+                &key,
+                count,
+                app.lists
                     .lock()
-                    .map_err(|_| anyhow!("unable to lock map"))?;
-                match lists_guard.get_mut(&key) {
-                    Some(list) => match list.pop_front() {
-                        Some(elem) => elem,
-                        None => RespValue::NullBulkString,
-                    },
-                    None => RespValue::NullBulkString,
-                }
-            };
+                    .map_err(|_| anyhow!("unable to lock map"))?,
+            );
 
             connection.write_value(&response).await?;
         }
     }
     Ok(())
+}
+
+fn lpop(key: &String, count: Option<usize>, mut lists_guard: MutexGuard<Lists>) -> RespValue {
+    let mut count = count.unwrap_or(1);
+
+    match lists_guard.get_mut(key) {
+        Some(list) => {
+            let mut popped = vec![];
+
+            count = std::cmp::min(count, list.len());
+            match count {
+                0 => RespValue::NullBulkString,
+                1 => match list.pop_front() {
+                    Some(elem) => elem,
+                    None => RespValue::NullBulkString,
+                },
+                count => {
+                    for _ in 0..count {
+                        let value = match list.pop_front() {
+                            Some(elem) => elem,
+                            None => RespValue::NullBulkString,
+                        };
+
+                        popped.push(value);
+                    }
+
+                    RespValue::Array(popped)
+                }
+            }
+        }
+
+        None => RespValue::NullBulkString,
+    }
 }

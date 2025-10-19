@@ -22,6 +22,7 @@ pub enum Command {
     },
     LPop {
         key: String,
+        count: Option<usize>,
     },
     LRange {
         key: String,
@@ -233,13 +234,31 @@ impl TryFrom<RespValue> for Command {
                             }
                         }
                         "LPOP" => {
-                            if data.len() != 2 {
+                            if data.len() < 2 {
                                 println!("invalid command {:?}", resp_value);
                                 return Err(ParseCommandError::WrongNumberArguments);
                             }
+
+                            let count = if data.len() > 2 {
+                                match &data[2] {
+                                    RespValue::BulkString(s) => {
+                                        let count: usize = s.parse().map_err(|e| {
+                                            println!("error parsing integer: {:?}", e);
+                                            ParseCommandError::InvalidArgument
+                                        })?;
+
+                                        Some(count)
+                                    }
+                                    _ => return Err(ParseCommandError::WrongNumberArguments),
+                                }
+                            } else {
+                                None
+                            };
+
                             match &data[1] {
                                 RespValue::BulkString(key) => Ok(Command::LPop {
                                     key: key.to_string(),
+                                    count,
                                 }),
                                 _ => {
                                     println!("invalid command {:?}", resp_value);
