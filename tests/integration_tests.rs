@@ -569,3 +569,81 @@ async fn lpop_works() {
         .expect("failed to execute LRANGE");
     assert_eq!(result, Vec::<String>::new());
 }
+
+#[tokio::test]
+async fn lpop_multiple_works() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let data: redis::Value = redis::cmd("LPOP")
+        .arg("mylist")
+        .arg(3)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LPOP");
+    assert_eq!(data, redis::Value::Nil);
+
+    let data: i64 = redis::cmd("RPUSH")
+        .arg("mylist")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .arg("d")
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute RPUSH");
+    assert_eq!(data, 4);
+
+    let data: Vec<String> = redis::cmd("LPOP")
+        .arg("mylist")
+        .arg(2)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LPOP");
+    assert_eq!(data, vec!["a", "b"]);
+
+    let result: Vec<String> = redis::cmd("LRANGE")
+        .arg("mylist")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LRANGE");
+    assert_eq!(result, vec!["c", "d"]);
+
+    let data: Vec<String> = redis::cmd("LPOP")
+        .arg("mylist")
+        .arg(4)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LPOP");
+    assert_eq!(data, vec!["c", "d"]);
+
+    let result: Vec<String> = redis::cmd("LRANGE")
+        .arg("mylist")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LRANGE");
+    assert_eq!(result, Vec::<String>::new());
+
+    let data: redis::Value = redis::cmd("LPOP")
+        .arg("mylist")
+        .arg(2)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LPOP");
+    assert_eq!(data, redis::Value::Nil);
+
+    let result: Vec<String> = redis::cmd("LRANGE")
+        .arg("mylist")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut conn)
+        .await
+        .expect("failed to execute LRANGE");
+    assert_eq!(result, Vec::<String>::new());
+}
