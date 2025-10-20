@@ -650,3 +650,67 @@ async fn lpop_multiple_works() {
         .expect("failed to execute LRANGE");
     assert_eq!(result, Vec::<String>::new());
 }
+
+#[tokio::test]
+async fn blpop_without_timeout_works() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let client2 = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn2 = client2.get_multiplexed_async_connection().await.unwrap();
+
+    let client3 = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn3 = client3.get_multiplexed_async_connection().await.unwrap();
+
+    let handle1 = tokio::spawn(async move {
+        sleep(Duration::from_millis(10)).await;
+        let data: i64 = redis::cmd("RPUSH")
+            .arg("mylist")
+            .arg("foo")
+            .query_async(&mut conn2)
+            .await
+            .unwrap();
+        assert_eq!(data, 1);
+
+        let data: i64 = redis::cmd("LPUSH")
+            .arg("mylist")
+            .arg("bar")
+            .query_async(&mut conn2)
+            .await
+            .unwrap();
+        assert_eq!(data, 1);
+    });
+
+    let handle2 = tokio::spawn(async move {
+        sleep(Duration::from_millis(5)).await;
+        let data: Vec<String> = redis::cmd("BLPOP")
+            .arg("mylist")
+            .arg(0)
+            .query_async(&mut conn3)
+            .await
+            .unwrap();
+        assert_eq!(data, vec!["mylist", "bar"]);
+    });
+
+    let data: Vec<String> = redis::cmd("BLPOP")
+        .arg("mylist")
+        .arg(0)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, vec!["mylist", "foo"]);
+
+    handle1.await.unwrap();
+    handle2.await.unwrap();
+
+    let result: Vec<String> = redis::cmd("LRANGE")
+        .arg("mylist")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(result, Vec::<String>::new());
+}

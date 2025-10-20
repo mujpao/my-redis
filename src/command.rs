@@ -32,6 +32,10 @@ pub enum Command {
     LLen {
         key: String,
     },
+    BLPop {
+        key: String,
+        timeout: Option<f64>,
+    },
 }
 
 #[derive(Debug)]
@@ -260,6 +264,38 @@ impl TryFrom<RespValue> for Command {
                                     key: key.to_string(),
                                     count,
                                 }),
+                                _ => {
+                                    println!("invalid command {:?}", resp_value);
+                                    Err(ParseCommandError::InvalidArgument)
+                                }
+                            }
+                        }
+                        "BLPOP" => {
+                            if data.len() != 3 {
+                                println!("invalid command {:?}", resp_value);
+                                return Err(ParseCommandError::WrongNumberArguments);
+                            }
+                            match (&data[1], &data[2]) {
+                                (RespValue::BulkString(key), RespValue::BulkString(s)) => {
+                                    let timeout: f64 = s.parse().map_err(|e| {
+                                        println!("error parsing integer: {:?}", e);
+                                        ParseCommandError::InvalidArgument
+                                    })?;
+
+                                    let timeout = if timeout < 0.0 {
+                                        return Err(ParseCommandError::InvalidArgument);
+                                    } else if timeout == 0.0 {
+                                        None
+                                    } else {
+                                        Some(timeout)
+                                    };
+
+                                    Ok(Command::BLPop {
+                                        key: key.to_string(),
+                                        timeout,
+                                    })
+                                }
+
                                 _ => {
                                     println!("invalid command {:?}", resp_value);
                                     Err(ParseCommandError::InvalidArgument)
