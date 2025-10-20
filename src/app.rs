@@ -55,6 +55,8 @@ impl App {
                         if let Some(expires_at) = listener.expires_at {
                             if expires_at < Instant::now() {
                                 println!("blpop listener has expired");
+                                let to_send = RespValue::NullArray;
+                                let _ = listener.tx.send(to_send);
                                 return None;
                             }
                         }
@@ -284,26 +286,43 @@ async fn handle_command(
             connection.write_value(&response).await?;
         }
         Command::BLPop { key, timeout } => {
-            let expires_at = timeout.map(|timeout| {
-                let duration = Duration::from_secs_f64(timeout);
-                Instant::now() + duration
-            });
-
-            let (tx, rx) = oneshot::channel();
-
-            {
-                let mut listeners_guard = app
-                    .blpop_listeners
+            let elem = {
+                let mut lists_guard = app
+                    .lists
                     .lock()
-                    .map_err(|_| anyhow!("unable to lock listeners"))?;
+                    .map_err(|_| anyhow!("unable to lock map"))?;
+                lists_guard
+                    .get_mut(&key)
+                    .map(|list| list.pop_front())
+                    .flatten()
+            };
 
-                let list = listeners_guard
-                    .entry(key.to_string())
-                    .or_insert_with(|| Vec::new());
-                list.push(BLPopListener { tx, expires_at });
-            }
+            let response = match elem {
+                Some(elem) => RespValue::Array(vec![RespValue::BulkString(key.clone()), elem]),
+                None => {
+                    let (tx, rx) = oneshot::channel();
 
-            let response = rx.await?;
+                    let expires_at = timeout.map(|timeout| {
+                        let duration = Duration::from_secs_f64(timeout);
+                        Instant::now() + duration
+                    });
+
+                    {
+                        let mut listeners_guard = app
+                            .blpop_listeners
+                            .lock()
+                            .map_err(|_| anyhow!("unable to lock listeners"))?;
+
+                        let list = listeners_guard
+                            .entry(key.to_string())
+                            .or_insert_with(|| Vec::new());
+                        list.push(BLPopListener { tx, expires_at });
+                    }
+
+                    rx.await?
+                }
+            };
+
             connection.write_value(&response).await?;
         }
     }
