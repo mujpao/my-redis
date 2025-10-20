@@ -301,11 +301,9 @@ async fn handle_command(
                 Some(elem) => RespValue::Array(vec![RespValue::BulkString(key.clone()), elem]),
                 None => {
                     let (tx, rx) = oneshot::channel();
+                    let duration = timeout.map(|timeout| Duration::from_secs_f64(timeout));
 
-                    let expires_at = timeout.map(|timeout| {
-                        let duration = Duration::from_secs_f64(timeout);
-                        Instant::now() + duration
-                    });
+                    let expires_at = duration.map(|duration| Instant::now() + duration);
 
                     {
                         let mut listeners_guard = app
@@ -319,7 +317,16 @@ async fn handle_command(
                         list.push(BLPopListener { tx, expires_at });
                     }
 
-                    rx.await?
+                    match duration {
+                        Some(duration) => {
+                            let result = tokio::time::timeout(duration, rx).await;
+                            match result {
+                                Ok(result) => result?,
+                                Err(_) => RespValue::NullArray,
+                            }
+                        }
+                        None => rx.await?,
+                    }
                 }
             };
 

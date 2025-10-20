@@ -777,4 +777,12 @@ async fn blpop_with_timeout_works() {
     assert_eq!(data, vec!["mylist", "bar"]);
 
     handle2.await.unwrap();
+
+    let data: redis::Value = redis::cmd("BLPOP")
+        .arg("mylist")
+        .arg(0.1)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, redis::Value::Nil);
 }
