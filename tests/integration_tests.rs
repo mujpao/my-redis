@@ -1,4 +1,4 @@
-use codecrafters_redis::app::{App, run};
+use codecrafters_redis::app::run;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::time::sleep;
@@ -7,11 +7,7 @@ async fn setup() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 
-    let _ = tokio::spawn(async {
-        let app = App::new();
-
-        run(app, listener).await
-    });
+    let _ = tokio::spawn(async { run(listener).await });
 
     port
 }

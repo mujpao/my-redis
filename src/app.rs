@@ -3,12 +3,11 @@ use crate::connection::Connection;
 use crate::resp::RespValue;
 use anyhow::anyhow;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 type Map = HashMap<String, (String, Option<Instant>)>;
 type Lists = HashMap<String, VecDeque<RespValue>>;
@@ -19,221 +18,161 @@ struct BLPopListener {
     expires_at: Option<Instant>,
 }
 
-pub struct App {
-    map: Mutex<Map>,
-    lists: Mutex<Lists>,
-    blpop_listeners: Mutex<HashMap<String, Vec<BLPopListener>>>,
+#[derive(Debug)]
+enum CommandResponse {
+    NonBlocking(RespValue),
+    Blocking((oneshot::Receiver<RespValue>, Option<Duration>)),
+}
+
+pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
+    let map = HashMap::new();
+    let lists = HashMap::new();
+    let blpop_listeners = HashMap::new();
+
+    let (command_tx, command_rx) = mpsc::channel(100);
+
+    let mut app = App {
+        map,
+        lists,
+        blpop_listeners,
+        command_rx,
+    };
+
+    tokio::spawn(async move {
+        accept_listeners(listener, command_tx).await.unwrap();
+    });
+
+    app.process_commands().await
+}
+
+struct App {
+    map: Map,
+    lists: Lists,
+    blpop_listeners: HashMap<String, Vec<BLPopListener>>,
+    command_rx: mpsc::Receiver<(Command, oneshot::Sender<CommandResponse>)>,
 }
 
 impl App {
-    pub fn new() -> Self {
-        let map = Mutex::new(HashMap::new());
-        let lists = Mutex::new(HashMap::new());
-        let blpop_listeners = Mutex::new(HashMap::new());
-
-        Self {
-            map,
-            lists,
-            blpop_listeners,
-        }
-    }
-
-    fn notify_blpop_listeners(&self, key: &String) -> anyhow::Result<()> {
-        let mut listeners_guard = self
-            .blpop_listeners
-            .lock()
-            .map_err(|_| anyhow!("unable to lock listeners"))?;
-        match listeners_guard.remove(key) {
-            Some(mut listeners) => {
-                let mut lists_guard = self
-                    .lists
-                    .lock()
-                    .map_err(|_| anyhow!("unable to lock lists"))?;
-                listeners = listeners
-                    .into_iter()
-                    .filter_map(|listener| {
-                        if let Some(expires_at) = listener.expires_at {
-                            if expires_at < Instant::now() {
-                                println!("blpop listener has expired");
-                                let to_send = RespValue::NullArray;
-                                let _ = listener.tx.send(to_send);
-                                return None;
-                            }
-                        }
-
-                        if let Some(list) = lists_guard.get_mut(key) {
-                            match list.pop_front() {
-                                Some(elem) => {
-                                    let to_send = RespValue::Array(vec![
-                                        RespValue::BulkString(key.clone()),
-                                        elem,
-                                    ]);
-                                    let _ = listener.tx.send(to_send);
-                                    None
-                                }
-                                None => Some(listener),
-                            }
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                listeners_guard.insert(key.clone(), listeners);
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-}
-
-pub async fn run(app: App, listener: TcpListener) -> anyhow::Result<()> {
-    let app = Arc::new(app);
-    loop {
-        let app = Arc::clone(&app);
-        let (stream, _) = listener.accept().await?;
-        println!("accepted new connection");
-
-        let _: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-            let mut connection = Connection::new(stream);
-            loop {
-                let value = connection.read_value().await;
-
-                if let Some(value) = value? {
-                    println!("read {:?}", value);
-
-                    match Command::try_from(value) {
-                        Ok(command) => {
-                            let app_cloned = Arc::clone(&app);
-                            handle_command(app_cloned, command, &mut connection).await?;
-                        }
-                        Err(e) => {
-                            let s = format!("{}", e);
-                            let to_send = RespValue::SimpleError(s);
-                            connection.write_value(&to_send).await?;
-                        }
-                    }
+    async fn process_commands(&mut self) -> anyhow::Result<()> {
+        loop {
+            match self.command_rx.recv().await {
+                Some((command, resp_tx)) => {
+                    self.process_command(command, resp_tx).await?;
+                }
+                None => {
+                    return Err(anyhow!("command channel closed"));
                 }
             }
-        });
+        }
     }
-}
 
-async fn handle_command(
-    app: Arc<App>,
-    command: Command,
-    connection: &mut Connection,
-) -> anyhow::Result<()> {
-    match command {
-        Command::Ping => {
-            let to_send = RespValue::SimpleString(String::from("PONG"));
-            connection.write_value(&to_send).await?;
-        }
-        Command::Echo(s) => {
-            let to_send = RespValue::BulkString(s);
-            connection.write_value(&to_send).await?;
-        }
-        Command::Set {
-            key,
-            value,
-            expiry_duration,
-        } => {
-            let expiry_time = if let Some(duration) = expiry_duration {
-                Some(Instant::now() + duration)
-            } else {
-                None
-            };
-            {
-                let mut map_guard = app.map.lock().map_err(|_| anyhow!("unable to lock map"))?;
-                map_guard.insert(key.to_string(), (value.to_string(), expiry_time));
+    async fn process_command(
+        &mut self,
+        command: Command,
+        resp_tx: oneshot::Sender<CommandResponse>,
+    ) -> anyhow::Result<()> {
+        match command {
+            Command::Ping => {
+                let response = RespValue::SimpleString(String::from("PONG"));
+                resp_tx
+                    .send(CommandResponse::NonBlocking(response))
+                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
             }
-
-            if let Some(duration) = expiry_duration {
-                let cloned_app = Arc::clone(&app);
-                tokio::spawn(async move {
-                    sleep(duration).await;
-
-                    {
-                        let mut map_guard = cloned_app
-                            .map
-                            .lock()
-                            .map_err(|_| anyhow!("unable to lock map"))?;
-                        map_guard.insert(key.to_string(), (value.to_string(), expiry_time));
-
-                        if let Some((_, Some(key_expires_at))) = map_guard.get(&key) {
-                            if *key_expires_at < Instant::now() {
-                                map_guard.remove(&key);
-                            }
-                        }
-                    }
-
-                    Ok::<(), anyhow::Error>(())
-                });
+            Command::Echo(s) => {
+                let response = RespValue::BulkString(s);
+                resp_tx
+                    .send(CommandResponse::NonBlocking(response))
+                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
             }
+            Command::Set {
+                key,
+                value,
+                expiry_duration,
+            } => {
+                let expiry_time = if let Some(duration) = expiry_duration {
+                    Some(Instant::now() + duration)
+                } else {
+                    None
+                };
+                self.map
+                    .insert(key.to_string(), (value.to_string(), expiry_time));
 
-            let to_send = RespValue::SimpleString(String::from("OK"));
-            connection.write_value(&to_send).await?;
-        }
-        Command::Get { key } => {
-            let response = {
-                let map_guard = app.map.lock().map_err(|_| anyhow!("unable to lock map"))?;
-                match map_guard.get(&key) {
+                if let Some(duration) = expiry_duration {
+                    // let cloned_app = Arc::clone(&app);
+                    // tokio::spawn(async move {
+                    //     sleep(duration).await;
+                    //     // TODO Need some kind of event handling.
+                    //     // maybe app can have a separate channel that handles
+                    //     // events instead of commands.
+                    //     // can send event to this channel upon timeout.
+
+                    //     {
+                    //         let mut map_guard = cloned_app
+                    //             .map
+                    //             .lock()
+                    //             .map_err(|_| anyhow!("unable to lock map"))?;
+                    //         map_guard.insert(key.to_string(), (value.to_string(), expiry_time));
+
+                    //         if let Some((_, Some(key_expires_at))) = map_guard.get(&key) {
+                    //             if *key_expires_at < Instant::now() {
+                    //                 map_guard.remove(&key);
+                    //             }
+                    //         }
+                    //     }
+
+                    //     Ok::<(), anyhow::Error>(())
+                    // });
+                }
+
+                let response = RespValue::SimpleString(String::from("OK"));
+                resp_tx
+                    .send(CommandResponse::NonBlocking(response))
+                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+            }
+            Command::Get { key } => {
+                let response = match self.map.get(&key) {
                     Some((value, _)) => RespValue::BulkString(value.clone()),
                     None => RespValue::NullBulkString,
-                }
-            };
+                };
 
-            connection.write_value(&response).await?;
-        }
-        Command::RPush { key, elements } => {
-            let len = {
-                let mut lists_guard = app
+                resp_tx
+                    .send(CommandResponse::NonBlocking(response))
+                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+            }
+            Command::RPush { key, elements } => {
+                let list = self
                     .lists
-                    .lock()
-                    .map_err(|_| anyhow!("unable to lock lists"))?;
-                let list = lists_guard
                     .entry(key.to_string())
                     .or_insert_with(|| VecDeque::new());
                 list.extend(elements);
 
-                list.len()
-            };
+                resp_tx
+                    .send(CommandResponse::NonBlocking(RespValue::Integer(
+                        list.len() as i64
+                    )))
+                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
 
-            connection
-                .write_value(&RespValue::Integer(len as i64))
-                .await?;
-
-            app.notify_blpop_listeners(&key)?;
-        }
-        Command::LPush { key, elements } => {
-            let len = {
-                let mut lists_guard = app
+                self.notify_blpop_listeners(&key)?;
+            }
+            Command::LPush { key, elements } => {
+                let list = self
                     .lists
-                    .lock()
-                    .map_err(|_| anyhow!("unable to lock lists"))?;
-                let list = lists_guard
                     .entry(key.to_string())
                     .or_insert_with(|| VecDeque::new());
                 for elem in elements {
                     list.push_front(elem);
                 }
 
-                list.len()
-            };
+                resp_tx
+                    .send(CommandResponse::NonBlocking(RespValue::Integer(
+                        list.len() as i64
+                    )))
+                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
 
-            connection
-                .write_value(&RespValue::Integer(len as i64))
-                .await?;
-
-            app.notify_blpop_listeners(&key)?;
-        }
-        Command::LRange { key, start, stop } => {
-            let value = {
-                let lists_guard = app
-                    .lists
-                    .lock()
-                    .map_err(|_| anyhow!("unable to lock lists"))?;
-                match lists_guard.get(&key) {
+                self.notify_blpop_listeners(&key)?;
+            }
+            Command::LRange { key, start, stop } => {
+                let value = match self.lists.get(&key) {
                     Some(entry) => {
                         let start: usize = if start < 0 {
                             std::cmp::max(start + entry.len() as i64, 0) as usize
@@ -255,91 +194,157 @@ async fn handle_command(
                         }
                     }
                     _ => Vec::<RespValue>::new(),
-                }
-            };
+                };
 
-            connection.write_value(&RespValue::Array(value)).await?;
-        }
-        Command::LLen { key } => {
-            let response = {
-                let lists_guard = app
-                    .lists
-                    .lock()
-                    .map_err(|_| anyhow!("unable to lock map"))?;
-                match lists_guard.get(&key) {
+                resp_tx
+                    .send(CommandResponse::NonBlocking(RespValue::Array(value)))
+                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+            }
+            Command::LLen { key } => {
+                let response = match self.lists.get(&key) {
                     Some(list) => RespValue::Integer(list.len() as i64),
                     None => RespValue::Integer(0),
-                }
-            };
+                };
 
-            connection.write_value(&response).await?;
-        }
-        Command::LPop { key, count } => {
-            let response = lpop(
-                &key,
-                count,
-                app.lists
-                    .lock()
-                    .map_err(|_| anyhow!("unable to lock map"))?,
-            );
+                resp_tx
+                    .send(CommandResponse::NonBlocking(response))
+                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+            }
+            Command::LPop { key, count } => {
+                let response = lpop(&key, count, &mut self.lists);
 
-            connection.write_value(&response).await?;
-        }
-        Command::BLPop { key, timeout } => {
-            let elem = {
-                let mut lists_guard = app
+                resp_tx
+                    .send(CommandResponse::NonBlocking(response))
+                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+            }
+            Command::BLPop { key, timeout } => {
+                let elem = self
                     .lists
-                    .lock()
-                    .map_err(|_| anyhow!("unable to lock map"))?;
-                lists_guard
                     .get_mut(&key)
                     .map(|list| list.pop_front())
-                    .flatten()
-            };
+                    .flatten();
 
-            let response = match elem {
-                Some(elem) => RespValue::Array(vec![RespValue::BulkString(key.clone()), elem]),
-                None => {
-                    let (tx, rx) = oneshot::channel();
-                    let duration = timeout.map(|timeout| Duration::from_secs_f64(timeout));
+                let response = match elem {
+                    Some(elem) => CommandResponse::NonBlocking(RespValue::Array(vec![
+                        RespValue::BulkString(key.clone()),
+                        elem,
+                    ])),
+                    None => {
+                        let (tx, rx) = oneshot::channel();
+                        let duration = timeout.map(|timeout| Duration::from_secs_f64(timeout));
 
-                    let expires_at = duration.map(|duration| Instant::now() + duration);
+                        let expires_at = duration.map(|duration| Instant::now() + duration);
 
-                    {
-                        let mut listeners_guard = app
+                        let list = self
                             .blpop_listeners
-                            .lock()
-                            .map_err(|_| anyhow!("unable to lock listeners"))?;
-
-                        let list = listeners_guard
                             .entry(key.to_string())
                             .or_insert_with(|| Vec::new());
                         list.push(BLPopListener { tx, expires_at });
+                        CommandResponse::Blocking((rx, duration))
                     }
+                };
 
-                    match duration {
-                        Some(duration) => {
-                            let result = tokio::time::timeout(duration, rx).await;
-                            match result {
-                                Ok(result) => result?,
-                                Err(_) => RespValue::NullArray,
+                resp_tx
+                    .send(response)
+                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn notify_blpop_listeners(&mut self, key: &String) -> anyhow::Result<()> {
+        match self.blpop_listeners.remove(key) {
+            Some(mut listeners) => {
+                listeners = listeners
+                    .into_iter()
+                    .filter_map(|listener| {
+                        if let Some(expires_at) = listener.expires_at {
+                            if expires_at < Instant::now() {
+                                println!("blpop listener has expired");
+                                let to_send = RespValue::NullArray;
+                                let _ = listener.tx.send(to_send);
+                                return None;
                             }
                         }
-                        None => rx.await?,
-                    }
-                }
-            };
 
-            connection.write_value(&response).await?;
+                        if let Some(list) = self.lists.get_mut(key) {
+                            match list.pop_front() {
+                                Some(elem) => {
+                                    let to_send = RespValue::Array(vec![
+                                        RespValue::BulkString(key.clone()),
+                                        elem,
+                                    ]);
+                                    let _ = listener.tx.send(to_send);
+                                    None
+                                }
+                                None => Some(listener),
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                self.blpop_listeners.insert(key.clone(), listeners);
+            }
+            _ => {}
         }
+        Ok(())
     }
-    Ok(())
 }
 
-fn lpop(key: &String, count: Option<usize>, mut lists_guard: MutexGuard<Lists>) -> RespValue {
+async fn accept_listeners(
+    listener: TcpListener,
+    tx: mpsc::Sender<(Command, oneshot::Sender<CommandResponse>)>,
+) -> anyhow::Result<()> {
+    loop {
+        let tx = tx.clone();
+        let (stream, _) = listener.accept().await?;
+        println!("accepted new connection");
+
+        let _: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+            let mut connection = Connection::new(stream);
+            loop {
+                let value = connection.read_value().await;
+
+                if let Some(value) = value? {
+                    println!("read {:?}", value);
+
+                    match Command::try_from(value) {
+                        Ok(command) => {
+                            let (resp_tx, resp_rx) = oneshot::channel();
+                            tx.send((command, resp_tx)).await?;
+
+                            let response = resp_rx.await?;
+                            let to_send = match response {
+                                CommandResponse::NonBlocking(response) => response,
+                                CommandResponse::Blocking((rx, duration)) => match duration {
+                                    Some(duration) => match timeout(duration, rx).await {
+                                        Ok(Ok(value)) => value,
+                                        _ => RespValue::NullArray,
+                                    },
+                                    None => rx.await?,
+                                },
+                            };
+
+                            connection.write_value(&to_send).await?;
+                        }
+                        Err(e) => {
+                            let s = format!("{}", e);
+                            let to_send = RespValue::SimpleError(s);
+                            connection.write_value(&to_send).await?;
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
+fn lpop(key: &String, count: Option<usize>, lists: &mut Lists) -> RespValue {
     let mut count = count.unwrap_or(1);
 
-    match lists_guard.get_mut(key) {
+    match lists.get_mut(key) {
         Some(list) => {
             let mut popped = vec![];
 
