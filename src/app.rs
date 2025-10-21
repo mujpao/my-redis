@@ -5,6 +5,7 @@ use anyhow::anyhow;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
+use tokio::select;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
@@ -30,19 +31,26 @@ pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
     let blpop_listeners = HashMap::new();
 
     let (command_tx, command_rx) = mpsc::channel(100);
+    let (events_tx, events_rx) = mpsc::channel(100);
 
     let mut app = App {
         map,
         lists,
         blpop_listeners,
         command_rx,
+        events_tx,
+        events_rx,
     };
 
     tokio::spawn(async move {
         accept_listeners(listener, command_tx).await.unwrap();
     });
 
-    app.process_commands().await
+    app.run().await
+}
+
+enum AppEvent {
+    KeyExpired { key: String },
 }
 
 struct App {
@@ -50,20 +58,51 @@ struct App {
     lists: Lists,
     blpop_listeners: HashMap<String, Vec<BLPopListener>>,
     command_rx: mpsc::Receiver<(Command, oneshot::Sender<CommandResponse>)>,
+    events_tx: mpsc::Sender<AppEvent>,
+    events_rx: mpsc::Receiver<AppEvent>,
 }
 
 impl App {
-    async fn process_commands(&mut self) -> anyhow::Result<()> {
+    async fn run(&mut self) -> anyhow::Result<()> {
         loop {
-            match self.command_rx.recv().await {
-                Some((command, resp_tx)) => {
-                    self.process_command(command, resp_tx).await?;
+            select![
+                maybe_command = self.command_rx.recv() => {
+                    match maybe_command {
+                         Some((command, resp_tx))   => {
+                             self.process_command(command, resp_tx).await?;
+                          },
+                         None  => {
+                             return Err(anyhow!("command channel closed"));
+
+                         },
+                    }
                 }
-                None => {
-                    return Err(anyhow!("command channel closed"));
+                maybe_event = self.events_rx.recv() => {
+                    match maybe_event {
+                         Some(event)   => {
+                    self.process_event(event).await?;
+                          },
+                         None  => {
+                             return Err(anyhow!("event channel closed"));
+
+                         },
+                    }
+                }
+            ];
+        }
+    }
+
+    async fn process_event(&mut self, event: AppEvent) -> anyhow::Result<()> {
+        match event {
+            AppEvent::KeyExpired { key } => {
+                if let Some((_, Some(key_expires_at))) = self.map.get(&key) {
+                    if *key_expires_at < Instant::now() {
+                        self.map.remove(&key);
+                    }
                 }
             }
         }
+        Ok(())
     }
 
     async fn process_command(
@@ -97,31 +136,15 @@ impl App {
                 self.map
                     .insert(key.to_string(), (value.to_string(), expiry_time));
 
+                let tx_cloned = self.events_tx.clone();
+
                 if let Some(duration) = expiry_duration {
-                    // let cloned_app = Arc::clone(&app);
-                    // tokio::spawn(async move {
-                    //     sleep(duration).await;
-                    //     // TODO Need some kind of event handling.
-                    //     // maybe app can have a separate channel that handles
-                    //     // events instead of commands.
-                    //     // can send event to this channel upon timeout.
+                    tokio::spawn(async move {
+                        sleep(duration).await;
+                        tx_cloned.send(AppEvent::KeyExpired { key }).await?;
 
-                    //     {
-                    //         let mut map_guard = cloned_app
-                    //             .map
-                    //             .lock()
-                    //             .map_err(|_| anyhow!("unable to lock map"))?;
-                    //         map_guard.insert(key.to_string(), (value.to_string(), expiry_time));
-
-                    //         if let Some((_, Some(key_expires_at))) = map_guard.get(&key) {
-                    //             if *key_expires_at < Instant::now() {
-                    //                 map_guard.remove(&key);
-                    //             }
-                    //         }
-                    //     }
-
-                    //     Ok::<(), anyhow::Error>(())
-                    // });
+                        Ok::<(), anyhow::Error>(())
+                    });
                 }
 
                 let response = RespValue::SimpleString(String::from("OK"));
