@@ -94,9 +94,11 @@ impl std::fmt::Display for StreamError {
         match self {
             Self::NewIdLtePrevious => write!(
                 f,
-                "The ID specified in XADD is equal or smaller than the target stream top item"
+                "ERR The ID specified in XADD is equal or smaller than the target stream top item"
             ),
-            Self::IdEqualsZero => write!(f, "The ID specified in XADD must be greater than 0-0"),
+            Self::IdEqualsZero => {
+                write!(f, "ERR The ID specified in XADD must be greater than 0-0")
+            }
         }
     }
 }

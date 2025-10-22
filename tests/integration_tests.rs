@@ -892,10 +892,9 @@ async fn validate_stream_id() {
         .query_async(&mut conn)
         .await;
 
-    // For some reason, RedisError adds a colon to the output
     assert_eq!(
-        err.unwrap_err().to_string(),
-        "The: ID specified in XADD is equal or smaller than the target stream top item"
+        err.unwrap_err().detail().unwrap(),
+        "The ID specified in XADD is equal or smaller than the target stream top item"
     );
 
     let err: Result<String, redis::RedisError> = redis::cmd("XADD")
@@ -906,8 +905,8 @@ async fn validate_stream_id() {
         .query_async(&mut conn)
         .await;
     assert_eq!(
-        err.unwrap_err().to_string(),
-        "The: ID specified in XADD is equal or smaller than the target stream top item"
+        err.unwrap_err().detail().unwrap(),
+        "The ID specified in XADD is equal or smaller than the target stream top item"
     );
 
     let err: Result<String, redis::RedisError> = redis::cmd("XADD")
@@ -918,8 +917,8 @@ async fn validate_stream_id() {
         .query_async(&mut conn)
         .await;
     assert_eq!(
-        err.unwrap_err().to_string(),
-        "The: ID specified in XADD is equal or smaller than the target stream top item"
+        err.unwrap_err().detail().unwrap(),
+        "The ID specified in XADD is equal or smaller than the target stream top item"
     );
 
     let err: Result<String, redis::RedisError> = redis::cmd("XADD")
@@ -930,8 +929,8 @@ async fn validate_stream_id() {
         .query_async(&mut conn)
         .await;
     assert_eq!(
-        err.unwrap_err().to_string(),
-        "The: ID specified in XADD is equal or smaller than the target stream top item"
+        err.unwrap_err().detail().unwrap(),
+        "The ID specified in XADD is equal or smaller than the target stream top item"
     );
 
     let err: Result<String, redis::RedisError> = redis::cmd("XADD")
@@ -942,8 +941,8 @@ async fn validate_stream_id() {
         .query_async(&mut conn)
         .await;
     assert_eq!(
-        err.unwrap_err().to_string(),
-        "The: ID specified in XADD is equal or smaller than the target stream top item"
+        err.unwrap_err().detail().unwrap(),
+        "The ID specified in XADD is equal or smaller than the target stream top item"
     );
 
     let err: Result<String, redis::RedisError> = redis::cmd("XADD")
@@ -954,8 +953,8 @@ async fn validate_stream_id() {
         .query_async(&mut conn)
         .await;
     assert_eq!(
-        err.unwrap_err().to_string(),
-        "The: ID specified in XADD must be greater than 0-0"
+        err.unwrap_err().detail().unwrap(),
+        "The ID specified in XADD must be greater than 0-0"
     );
 
     let data: String = redis::cmd("XADD")
