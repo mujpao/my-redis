@@ -39,6 +39,11 @@ pub enum Command {
     Type {
         key: String,
     },
+    XAdd {
+        key: String,
+        id: String,
+        pairs: Vec<(String, String)>,
+    },
 }
 
 #[derive(Debug)]
@@ -314,6 +319,44 @@ impl TryFrom<RespValue> for Command {
                                 RespValue::BulkString(key) => Ok(Command::Type {
                                     key: key.to_string(),
                                 }),
+                                _ => {
+                                    println!("invalid command {:?}", resp_value);
+                                    Err(ParseCommandError::InvalidArgument)
+                                }
+                            }
+                        }
+                        "XADD" => {
+                            if data.len() < 5 {
+                                println!("invalid command {:?}", resp_value);
+                                return Err(ParseCommandError::WrongNumberArguments);
+                            }
+                            match (&data[1], &data[2]) {
+                                (RespValue::BulkString(key), RespValue::BulkString(id)) => {
+                                    let mut pairs = Vec::new();
+                                    let mut field_idx = 3;
+                                    let mut value_idx = field_idx + 1;
+                                    while value_idx < data.len() {
+                                        match (&data[field_idx], &data[value_idx]) {
+                                            (
+                                                RespValue::BulkString(field),
+                                                RespValue::BulkString(value),
+                                            ) => {
+                                                pairs.push((field.to_string(), value.to_string()));
+                                                field_idx = field_idx + 2;
+                                                value_idx = field_idx + 1;
+                                            }
+                                            _ => {
+                                                println!("invalid command {:?}", resp_value);
+                                                return Err(ParseCommandError::InvalidArgument);
+                                            }
+                                        }
+                                    }
+                                    Ok(Command::XAdd {
+                                        key: key.to_string(),
+                                        id: id.to_string(),
+                                        pairs,
+                                    })
+                                }
                                 _ => {
                                     println!("invalid command {:?}", resp_value);
                                     Err(ParseCommandError::InvalidArgument)

@@ -829,3 +829,30 @@ async fn type_works() {
         .unwrap();
     assert_eq!(result, String::from("none"));
 }
+
+#[tokio::test]
+async fn create_stream_works() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let data: String = redis::cmd("XADD")
+        .arg("stream_key")
+        .arg("1526919030474-0")
+        .arg("temperature")
+        .arg(36)
+        .arg("humidity")
+        .arg(95)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "1526919030474-0");
+
+    let result: String = redis::cmd("TYPE")
+        .arg("stream_key")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(result, String::from("stream"));
+}
