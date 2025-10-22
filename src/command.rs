@@ -36,6 +36,9 @@ pub enum Command {
         key: String,
         timeout: Option<f64>,
     },
+    Type {
+        key: String,
+    },
 }
 
 #[derive(Debug)]
@@ -296,6 +299,21 @@ impl TryFrom<RespValue> for Command {
                                     })
                                 }
 
+                                _ => {
+                                    println!("invalid command {:?}", resp_value);
+                                    Err(ParseCommandError::InvalidArgument)
+                                }
+                            }
+                        }
+                        "TYPE" => {
+                            if data.len() < 2 {
+                                println!("invalid command {:?}", resp_value);
+                                return Err(ParseCommandError::WrongNumberArguments);
+                            }
+                            match &data[1] {
+                                RespValue::BulkString(key) => Ok(Command::Type {
+                                    key: key.to_string(),
+                                }),
                                 _ => {
                                     println!("invalid command {:?}", resp_value);
                                     Err(ParseCommandError::InvalidArgument)

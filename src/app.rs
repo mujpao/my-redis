@@ -302,6 +302,17 @@ impl App {
                     .send(response)
                     .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
             }
+            Command::Type { key } => {
+                let response = match self.map.get(&key) {
+                    Some(RedisDataType::String(_)) => RespValue::SimpleString("string".to_string()),
+                    Some(RedisDataType::List(_)) => RespValue::SimpleString("list".to_string()),
+                    None => RespValue::SimpleString("none".to_string()),
+                };
+
+                resp_tx
+                    .send(CommandResponse::NonBlocking(response))
+                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+            }
         }
         Ok(())
     }

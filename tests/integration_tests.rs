@@ -782,3 +782,50 @@ async fn blpop_with_timeout_works() {
         .unwrap();
     assert_eq!(data, redis::Value::Nil);
 }
+
+#[tokio::test]
+async fn type_works() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let data: i64 = redis::cmd("LPUSH")
+        .arg("list_key")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, 3);
+
+    let result: String = redis::cmd("TYPE")
+        .arg("list_key")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(result, String::from("list"));
+
+    let data: String = redis::cmd("SET")
+        .arg("foo")
+        .arg("bar")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "OK");
+
+    let result: String = redis::cmd("TYPE")
+        .arg("foo")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(result, String::from("string"));
+
+    let result: String = redis::cmd("TYPE")
+        .arg("keydoesn'texist")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(result, String::from("none"));
+}
