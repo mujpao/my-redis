@@ -856,3 +856,115 @@ async fn create_stream_works() {
         .unwrap();
     assert_eq!(result, String::from("stream"));
 }
+
+#[tokio::test]
+async fn validate_stream_id() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let data: String = redis::cmd("XADD")
+        .arg("some_key")
+        .arg("1-1")
+        .arg("foo")
+        .arg("bar")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "1-1");
+
+    let data: String = redis::cmd("XADD")
+        .arg("some_key")
+        .arg("1-2")
+        .arg("bar")
+        .arg("baz")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "1-2");
+
+    let err: Result<String, redis::RedisError> = redis::cmd("XADD")
+        .arg("some_key")
+        .arg("1-2")
+        .arg("bar")
+        .arg("baz")
+        .query_async(&mut conn)
+        .await;
+
+    // For some reason, RedisError adds a colon to the output
+    assert_eq!(
+        err.unwrap_err().to_string(),
+        "The: ID specified in XADD is equal or smaller than the target stream top item"
+    );
+
+    let err: Result<String, redis::RedisError> = redis::cmd("XADD")
+        .arg("some_key")
+        .arg("1-0")
+        .arg("bar")
+        .arg("baz")
+        .query_async(&mut conn)
+        .await;
+    assert_eq!(
+        err.unwrap_err().to_string(),
+        "The: ID specified in XADD is equal or smaller than the target stream top item"
+    );
+
+    let err: Result<String, redis::RedisError> = redis::cmd("XADD")
+        .arg("some_key")
+        .arg("0-2")
+        .arg("bar")
+        .arg("baz")
+        .query_async(&mut conn)
+        .await;
+    assert_eq!(
+        err.unwrap_err().to_string(),
+        "The: ID specified in XADD is equal or smaller than the target stream top item"
+    );
+
+    let err: Result<String, redis::RedisError> = redis::cmd("XADD")
+        .arg("some_key")
+        .arg("0-3")
+        .arg("bar")
+        .arg("baz")
+        .query_async(&mut conn)
+        .await;
+    assert_eq!(
+        err.unwrap_err().to_string(),
+        "The: ID specified in XADD is equal or smaller than the target stream top item"
+    );
+
+    let err: Result<String, redis::RedisError> = redis::cmd("XADD")
+        .arg("some_key")
+        .arg("0-2")
+        .arg("bar")
+        .arg("baz")
+        .query_async(&mut conn)
+        .await;
+    assert_eq!(
+        err.unwrap_err().to_string(),
+        "The: ID specified in XADD is equal or smaller than the target stream top item"
+    );
+
+    let err: Result<String, redis::RedisError> = redis::cmd("XADD")
+        .arg("some_key")
+        .arg("0-0")
+        .arg("bar")
+        .arg("baz")
+        .query_async(&mut conn)
+        .await;
+    assert_eq!(
+        err.unwrap_err().to_string(),
+        "The: ID specified in XADD must be greater than 0-0"
+    );
+
+    let data: String = redis::cmd("XADD")
+        .arg("some_key")
+        .arg("2-2")
+        .arg("bar")
+        .arg("baz")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "2-2");
+}

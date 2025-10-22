@@ -1,9 +1,10 @@
 use crate::command::Command;
 use crate::connection::Connection;
 use crate::resp::RespValue;
+use crate::stream::{Stream, StreamData, StreamId};
 use anyhow::anyhow;
-use radix_trie::Trie;
 use std::collections::{HashMap, VecDeque};
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::select;
@@ -17,26 +18,6 @@ enum RedisDataType {
     String(Box<(String, Option<Instant>)>),
     List(Box<VecDeque<RespValue>>),
     Stream(Box<Stream>),
-}
-
-struct Stream {
-    data: Trie<String, Vec<StreamData>>,
-}
-
-struct StreamData {
-    field: String,
-    value: String,
-}
-
-impl Stream {
-    fn new() -> Self {
-        Self { data: Trie::new() }
-    }
-
-    fn insert(&mut self, id: String, data: Vec<StreamData>) -> String {
-        self.data.insert(id.clone(), data);
-        id
-    }
 }
 
 #[derive(Debug)]
@@ -337,24 +318,36 @@ impl App {
                     .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
             }
             Command::XAdd { key, id, pairs } => {
-                let mut data = Vec::new();
-                for (field, value) in pairs {
-                    data.push(StreamData { field, value });
-                }
+                let response = match StreamId::from_str(&id) {
+                    Ok(id) => {
+                        let mut data = Vec::new();
+                        for (field, value) in pairs {
+                            data.push(StreamData { field, value });
+                        }
 
-                let response = match self.map.get_mut(&key) {
-                    Some(RedisDataType::Stream(stream)) => {
-                        let id = stream.insert(id, data);
-                        RespValue::BulkString(id)
+                        match self.map.get_mut(&key) {
+                            Some(RedisDataType::Stream(stream)) => match stream.append(id, data) {
+                                Ok(id) => RespValue::BulkString(id.to_string()),
+                                Err(e) => RespValue::SimpleError(e.to_string()),
+                            },
+                            None => {
+                                let mut stream = Stream::new();
+                                match stream.append(id, data) {
+                                    Ok(id) => {
+                                        self.map
+                                            .insert(key, RedisDataType::Stream(Box::new(stream)));
+                                        RespValue::BulkString(id.to_string())
+                                    }
+                                    Err(e) => RespValue::SimpleError(e.to_string()),
+                                }
+                            }
+                            _ => RespValue::SimpleError(String::from("Wrong type")),
+                        }
                     }
-                    None => {
-                        let mut stream = Stream::new();
-                        let id = stream.insert(id, data);
-                        self.map
-                            .insert(key, RedisDataType::Stream(Box::new(stream)));
-                        RespValue::BulkString(id)
+                    Err(e) => {
+                        println!("{:?}", e);
+                        RespValue::SimpleError(String::from("unable to parse stream id"))
                     }
-                    _ => RespValue::SimpleError(String::from("Wrong type")),
                 };
 
                 resp_tx
