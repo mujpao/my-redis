@@ -10,8 +10,12 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
-type Map = HashMap<String, (String, Option<Instant>)>;
-type Lists = HashMap<String, VecDeque<RespValue>>;
+type Map = HashMap<String, RedisDataType>;
+
+enum RedisDataType {
+    String(Box<(String, Option<Instant>)>),
+    List(Box<VecDeque<RespValue>>),
+}
 
 #[derive(Debug)]
 struct BLPopListener {
@@ -27,7 +31,6 @@ enum CommandResponse {
 
 pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
     let map = HashMap::new();
-    let lists = HashMap::new();
     let blpop_listeners = HashMap::new();
 
     let (command_tx, command_rx) = mpsc::channel(100);
@@ -35,7 +38,6 @@ pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
 
     let mut app = App {
         map,
-        lists,
         blpop_listeners,
         command_rx,
         events_tx,
@@ -55,7 +57,6 @@ enum AppEvent {
 
 struct App {
     map: Map,
-    lists: Lists,
     blpop_listeners: HashMap<String, Vec<BLPopListener>>,
     command_rx: mpsc::Receiver<(Command, oneshot::Sender<CommandResponse>)>,
     events_tx: mpsc::Sender<AppEvent>,
@@ -95,9 +96,11 @@ impl App {
     async fn process_event(&mut self, event: AppEvent) -> anyhow::Result<()> {
         match event {
             AppEvent::KeyExpired { key } => {
-                if let Some((_, Some(key_expires_at))) = self.map.get(&key) {
-                    if *key_expires_at < Instant::now() {
-                        self.map.remove(&key);
+                if let Some(RedisDataType::String(b)) = self.map.get(&key) {
+                    if let (_, Some(key_expires_at)) = **b {
+                        if key_expires_at < Instant::now() {
+                            self.map.remove(&key);
+                        }
                     }
                 }
             }
@@ -133,8 +136,10 @@ impl App {
                 } else {
                     None
                 };
-                self.map
-                    .insert(key.to_string(), (value.to_string(), expiry_time));
+                self.map.insert(
+                    key.to_string(),
+                    RedisDataType::String(Box::new((value.to_string(), expiry_time))),
+                );
 
                 let tx_cloned = self.events_tx.clone();
 
@@ -154,8 +159,9 @@ impl App {
             }
             Command::Get { key } => {
                 let response = match self.map.get(&key) {
-                    Some((value, _)) => RespValue::BulkString(value.clone()),
+                    Some(RedisDataType::String(value)) => RespValue::BulkString(value.0.clone()),
                     None => RespValue::NullBulkString,
+                    _ => RespValue::SimpleError(String::from("Wrong type")),
                 };
 
                 resp_tx
@@ -163,40 +169,61 @@ impl App {
                     .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
             }
             Command::RPush { key, elements } => {
-                let list = self
-                    .lists
-                    .entry(key.to_string())
-                    .or_insert_with(|| VecDeque::new());
-                list.extend(elements);
+                let response = match self.map.get_mut(&key) {
+                    Some(RedisDataType::List(list)) => {
+                        list.extend(elements);
+                        RespValue::Integer(list.len() as i64)
+                    }
+                    None => {
+                        let len = elements.len();
+                        self.map.insert(
+                            key.to_string(),
+                            RedisDataType::List(Box::new(VecDeque::from(elements))),
+                        );
+                        RespValue::Integer(len as i64)
+                    }
+                    _ => RespValue::SimpleError(String::from("Wrong type")),
+                };
 
                 resp_tx
-                    .send(CommandResponse::NonBlocking(RespValue::Integer(
-                        list.len() as i64
-                    )))
+                    .send(CommandResponse::NonBlocking(response))
                     .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
 
                 self.notify_blpop_listeners(&key)?;
             }
             Command::LPush { key, elements } => {
-                let list = self
-                    .lists
-                    .entry(key.to_string())
-                    .or_insert_with(|| VecDeque::new());
-                for elem in elements {
-                    list.push_front(elem);
-                }
+                let response = match self.map.get_mut(&key) {
+                    Some(RedisDataType::List(list)) => {
+                        for elem in elements {
+                            list.push_front(elem);
+                        }
+                        RespValue::Integer(list.len() as i64)
+                    }
+                    None => {
+                        let mut list = VecDeque::new();
+                        for elem in elements {
+                            list.push_front(elem);
+                        }
+
+                        let len = list.len();
+
+                        self.map
+                            .insert(key.to_string(), RedisDataType::List(Box::new(list)));
+
+                        RespValue::Integer(len as i64)
+                    }
+                    _ => RespValue::SimpleError(String::from("Wrong type")),
+                };
 
                 resp_tx
-                    .send(CommandResponse::NonBlocking(RespValue::Integer(
-                        list.len() as i64
-                    )))
+                    .send(CommandResponse::NonBlocking(response))
                     .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
 
                 self.notify_blpop_listeners(&key)?;
             }
             Command::LRange { key, start, stop } => {
-                let value = match self.lists.get(&key) {
-                    Some(entry) => {
+                let value = match self.map.get(&key) {
+                    Some(RedisDataType::List(entry)) => {
                         let start: usize = if start < 0 {
                             std::cmp::max(start + entry.len() as i64, 0) as usize
                         } else {
@@ -224,9 +251,10 @@ impl App {
                     .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
             }
             Command::LLen { key } => {
-                let response = match self.lists.get(&key) {
-                    Some(list) => RespValue::Integer(list.len() as i64),
+                let response = match self.map.get(&key) {
+                    Some(RedisDataType::List(list)) => RespValue::Integer(list.len() as i64),
                     None => RespValue::Integer(0),
+                    _ => RespValue::SimpleError(String::from("Wrong type")),
                 };
 
                 resp_tx
@@ -234,7 +262,7 @@ impl App {
                     .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
             }
             Command::LPop { key, count } => {
-                let response = lpop(&key, count, &mut self.lists);
+                let response = lpop(&key, count, &mut self.map);
 
                 resp_tx
                     .send(CommandResponse::NonBlocking(response))
@@ -242,9 +270,12 @@ impl App {
             }
             Command::BLPop { key, timeout } => {
                 let elem = self
-                    .lists
+                    .map
                     .get_mut(&key)
-                    .map(|list| list.pop_front())
+                    .map(|data| match data {
+                        RedisDataType::List(list) => list.pop_front(),
+                        _ => None,
+                    })
                     .flatten();
 
                 let response = match elem {
@@ -290,7 +321,7 @@ impl App {
                             }
                         }
 
-                        if let Some(list) = self.lists.get_mut(key) {
+                        if let Some(RedisDataType::List(list)) = self.map.get_mut(key) {
                             match list.pop_front() {
                                 Some(elem) => {
                                     let to_send = RespValue::Array(vec![
@@ -303,7 +334,7 @@ impl App {
                                 None => Some(listener),
                             }
                         } else {
-                            None
+                            Some(listener)
                         }
                     })
                     .collect();
@@ -364,11 +395,11 @@ async fn accept_listeners(
     }
 }
 
-fn lpop(key: &String, count: Option<usize>, lists: &mut Lists) -> RespValue {
+fn lpop(key: &String, count: Option<usize>, map: &mut Map) -> RespValue {
     let mut count = count.unwrap_or(1);
 
-    match lists.get_mut(key) {
-        Some(list) => {
+    match map.get_mut(key) {
+        Some(RedisDataType::List(list)) => {
             let mut popped = vec![];
 
             count = std::cmp::min(count, list.len());
@@ -392,7 +423,7 @@ fn lpop(key: &String, count: Option<usize>, lists: &mut Lists) -> RespValue {
                 }
             }
         }
-
+        Some(RedisDataType::String(_)) => RespValue::SimpleError(String::from("Wrong type")),
         None => RespValue::NullBulkString,
     }
 }
