@@ -967,3 +967,51 @@ async fn validate_stream_id() {
         .unwrap();
     assert_eq!(data, "2-2");
 }
+
+#[tokio::test]
+async fn auto_generate_stream_seq_no() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let data: String = redis::cmd("XADD")
+        .arg("some_key")
+        .arg("1-*")
+        .arg("foo")
+        .arg("bar")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "1-0");
+
+    let data: String = redis::cmd("XADD")
+        .arg("some_key")
+        .arg("1-*")
+        .arg("foo")
+        .arg("bar")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "1-1");
+
+    let data: String = redis::cmd("XADD")
+        .arg("some_key2")
+        .arg("0-*")
+        .arg("foo")
+        .arg("bar")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "0-1");
+
+    let data: String = redis::cmd("XADD")
+        .arg("some_key2")
+        .arg("5-*")
+        .arg("foo")
+        .arg("bar")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "5-0");
+}

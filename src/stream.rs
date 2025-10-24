@@ -16,7 +16,39 @@ impl Stream {
         }
     }
 
-    pub fn append(&mut self, id: StreamId, data: Vec<StreamData>) -> Result<StreamId, StreamError> {
+    pub fn append(
+        &mut self,
+        id: StreamIdInput,
+        data: Vec<StreamData>,
+    ) -> Result<StreamId, StreamError> {
+        let sequence_number = {
+            match id.sequence_number {
+                Some(sequence_number) => sequence_number,
+                None => {
+                    if let Some(last_entry_id) = &self.last_entry_id {
+                        if id.milliseconds_time == last_entry_id.milliseconds_time {
+                            last_entry_id.sequence_number + 1
+                        } else {
+                            match id.milliseconds_time {
+                                0 => 1,
+                                _ => 0,
+                            }
+                        }
+                    } else {
+                        match id.milliseconds_time {
+                            0 => 1,
+                            _ => 0,
+                        }
+                    }
+                }
+            }
+        };
+
+        let id = StreamId {
+            milliseconds_time: id.milliseconds_time,
+            sequence_number,
+        };
+
         if id
             == (StreamId {
                 milliseconds_time: 0,
@@ -42,19 +74,12 @@ pub struct StreamData {
     pub value: String,
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
-pub struct StreamId {
+pub struct StreamIdInput {
     pub milliseconds_time: usize,
-    pub sequence_number: usize,
+    pub sequence_number: Option<usize>,
 }
 
-impl std::fmt::Display for StreamId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}-{}", self.milliseconds_time, self.sequence_number)
-    }
-}
-
-impl FromStr for StreamId {
+impl FromStr for StreamIdInput {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -66,13 +91,30 @@ impl FromStr for StreamId {
         let milliseconds_time: usize = split_s[0]
             .parse()
             .map_err(|e| anyhow!("Unable to parse stream id, {:?}", e))?;
-        let sequence_number: usize = split_s[1]
-            .parse()
-            .map_err(|e| anyhow!("Unable to parse stream id, {:?}", e))?;
+        let sequence_number = match split_s[1] {
+            "*" => None,
+            num => Some(
+                num.parse::<usize>()
+                    .map_err(|e| anyhow!("Unable to parse stream id, {:?}", e))?,
+            ),
+        };
+
         Ok(Self {
             milliseconds_time,
             sequence_number,
         })
+    }
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub struct StreamId {
+    pub milliseconds_time: usize,
+    pub sequence_number: usize,
+}
+
+impl std::fmt::Display for StreamId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}-{}", self.milliseconds_time, self.sequence_number)
     }
 }
 

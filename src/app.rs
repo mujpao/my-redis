@@ -1,7 +1,7 @@
 use crate::command::Command;
 use crate::connection::Connection;
 use crate::resp::RespValue;
-use crate::stream::{Stream, StreamData, StreamId};
+use crate::stream::{Stream, StreamData, StreamIdInput};
 use anyhow::anyhow;
 use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
@@ -318,7 +318,7 @@ impl App {
                     .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
             }
             Command::XAdd { key, id, pairs } => {
-                let response = match StreamId::from_str(&id) {
+                let response = match StreamIdInput::from_str(&id) {
                     Ok(id) => {
                         let mut data = Vec::new();
                         for (field, value) in pairs {
