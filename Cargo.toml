@@ -12,4 +12,5 @@ thiserror = "1.0.32"                                # error handling
 tokio = { version = "1.47.1", features = ["full"] } # async networking
 
 [dev-dependencies]
+chrono = "0.4.42"
 redis = { version = "0.32.7", features = ["tokio-comp"] }

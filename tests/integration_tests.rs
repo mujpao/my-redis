@@ -1,3 +1,4 @@
+use chrono::DateTime;
 use codecrafters_redis::app::run;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -1014,4 +1015,17 @@ async fn auto_generate_stream_seq_no() {
         .await
         .unwrap();
     assert_eq!(data, "5-0");
+
+    let data: String = redis::cmd("XADD")
+        .arg("some_key3")
+        .arg("*")
+        .arg("foo")
+        .arg("bar")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let split_data: Vec<_> = data.split("-").collect();
+    assert_eq!(split_data[1], "0");
+    let millis: i64 = split_data[0].parse().unwrap();
+    DateTime::from_timestamp_millis(millis).expect("timestamp should be valid");
 }

@@ -1,5 +1,6 @@
 use anyhow::anyhow;
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use radix_trie::{Trie, TrieKey};
 
@@ -21,21 +22,31 @@ impl Stream {
         id: StreamIdInput,
         data: Vec<StreamData>,
     ) -> Result<StreamId, StreamError> {
+        let milliseconds_time = match id.milliseconds_time {
+            Some(milliseconds_time) => milliseconds_time,
+            None => match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(n) => n.as_millis() as usize,
+                Err(_) => {
+                    return Err(StreamError::InvalidTimestamp);
+                }
+            },
+        };
+
         let sequence_number = {
             match id.sequence_number {
                 Some(sequence_number) => sequence_number,
                 None => {
                     if let Some(last_entry_id) = &self.last_entry_id {
-                        if id.milliseconds_time == last_entry_id.milliseconds_time {
+                        if milliseconds_time == last_entry_id.milliseconds_time {
                             last_entry_id.sequence_number + 1
                         } else {
-                            match id.milliseconds_time {
+                            match milliseconds_time {
                                 0 => 1,
                                 _ => 0,
                             }
                         }
                     } else {
-                        match id.milliseconds_time {
+                        match milliseconds_time {
                             0 => 1,
                             _ => 0,
                         }
@@ -45,7 +56,7 @@ impl Stream {
         };
 
         let id = StreamId {
-            milliseconds_time: id.milliseconds_time,
+            milliseconds_time: milliseconds_time,
             sequence_number,
         };
 
@@ -75,7 +86,7 @@ pub struct StreamData {
 }
 
 pub struct StreamIdInput {
-    pub milliseconds_time: usize,
+    pub milliseconds_time: Option<usize>,
     pub sequence_number: Option<usize>,
 }
 
@@ -83,19 +94,28 @@ impl FromStr for StreamIdInput {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "*" {
+            return Ok(Self {
+                sequence_number: None,
+                milliseconds_time: None,
+            });
+        }
         let split_s: Vec<_> = s.split("-").collect();
         if split_s.len() != 2 {
-            return Err(anyhow!("Unable to parse stream id"));
+            return Err(anyhow!("Unable to split stream id"));
         }
 
-        let milliseconds_time: usize = split_s[0]
-            .parse()
-            .map_err(|e| anyhow!("Unable to parse stream id, {:?}", e))?;
+        let milliseconds_time = Some(
+            split_s[0]
+                .parse::<usize>()
+                .map_err(|e| anyhow!("Unable to parse stream id ms time, {:?}", e))?,
+        );
+
         let sequence_number = match split_s[1] {
             "*" => None,
             num => Some(
                 num.parse::<usize>()
-                    .map_err(|e| anyhow!("Unable to parse stream id, {:?}", e))?,
+                    .map_err(|e| anyhow!("Unable to parse stream id seq no, {:?}", e))?,
             ),
         };
 
@@ -129,6 +149,7 @@ impl TrieKey for StreamId {
 pub enum StreamError {
     NewIdLtePrevious,
     IdEqualsZero,
+    InvalidTimestamp,
 }
 
 impl std::fmt::Display for StreamError {
@@ -140,6 +161,9 @@ impl std::fmt::Display for StreamError {
             ),
             Self::IdEqualsZero => {
                 write!(f, "ERR The ID specified in XADD must be greater than 0-0")
+            }
+            Self::InvalidTimestamp => {
+                write!(f, "ERR The milliseconds timestamp is invalid")
             }
         }
     }
