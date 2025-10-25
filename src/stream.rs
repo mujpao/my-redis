@@ -91,14 +91,39 @@ impl Stream {
         }
 
         let common_prefix = if common_idx > 0 {
-            Some(StreamId::from_range(&start[0..common_idx]).unwrap())
+            Some(StreamId::from_range(&start[0..common_idx]).map_err(|e| {
+                println!("{:?}", e);
+                StreamError::InvalidRange
+            })?)
         } else {
             None
         };
 
-        let start = StreamId::from_range(start).unwrap();
-        let mut end = StreamId::from_range(end).unwrap();
-        end.sequence_number = usize::MAX;
+        let start = match start {
+            "-" => StreamId {
+                milliseconds_time: 0,
+                sequence_number: 0,
+            },
+            start => StreamId::from_range(start).map_err(|e| {
+                println!("{:?}", e);
+                StreamError::InvalidRange
+            })?,
+        };
+
+        let end = match end {
+            "+" => StreamId {
+                milliseconds_time: usize::MAX,
+                sequence_number: usize::MAX,
+            },
+            end => {
+                let mut end = StreamId::from_range(end).map_err(|e| {
+                    println!("{:?}", e);
+                    StreamError::InvalidRange
+                })?;
+                end.sequence_number = usize::MAX;
+                end
+            }
+        };
 
         let ancestor_iter = match common_prefix {
             Some(prefix) => self.data.get_raw_ancestor(&prefix).iter(),
@@ -231,6 +256,7 @@ pub enum StreamError {
     NewIdLtePrevious,
     IdEqualsZero,
     InvalidTimestamp,
+    InvalidRange,
 }
 
 impl std::fmt::Display for StreamError {
@@ -245,6 +271,9 @@ impl std::fmt::Display for StreamError {
             }
             Self::InvalidTimestamp => {
                 write!(f, "ERR The milliseconds timestamp is invalid")
+            }
+            Self::InvalidRange => {
+                write!(f, "ERR The range is invalid")
             }
         }
     }
