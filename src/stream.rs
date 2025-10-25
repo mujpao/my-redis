@@ -1,8 +1,8 @@
+use crate::resp::RespValue;
 use anyhow::anyhow;
+use radix_trie::{Trie, TrieCommon, TrieKey};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-use radix_trie::{Trie, TrieKey};
 
 pub struct Stream {
     data: Trie<StreamId, Vec<StreamData>>,
@@ -78,8 +78,58 @@ impl Stream {
         self.last_entry_id = Some(id.clone());
         Ok(id)
     }
+
+    pub fn range(&self, start: &str, end: &str) -> Result<RespValue, StreamError> {
+        let mut common_idx = 0;
+        for i in 0..std::cmp::min(start.len(), end.len()) {
+            if start[i..i + 1] != end[i..i + 1] {
+                common_idx = i;
+                break;
+            } else {
+                common_idx = i + 1;
+            }
+        }
+
+        let common_prefix = if common_idx > 0 {
+            Some(StreamId::from_range(&start[0..common_idx]).unwrap())
+        } else {
+            None
+        };
+
+        let start = StreamId::from_range(start).unwrap();
+        let mut end = StreamId::from_range(end).unwrap();
+        end.sequence_number = usize::MAX;
+
+        let ancestor_iter = match common_prefix {
+            Some(prefix) => self.data.get_raw_ancestor(&prefix).iter(),
+            None => {
+                // No common prefix, so we have to search the entire trie
+                self.data.iter()
+            }
+        };
+
+        let mut values_in_range = vec![];
+
+        for (id, data) in ancestor_iter {
+            if *id >= start && *id <= end {
+                let mut value_as_resp = vec![RespValue::BulkString(id.to_string())];
+
+                let mut fields = vec![];
+                for StreamData { field, value } in data {
+                    fields.push(RespValue::BulkString(field.into()));
+                    fields.push(RespValue::BulkString(value.into()));
+                }
+
+                value_as_resp.push(RespValue::Array(fields));
+                values_in_range.push(RespValue::Array(value_as_resp));
+            }
+        }
+
+        Ok(RespValue::Array(values_in_range))
+    }
 }
 
+#[derive(Debug)]
 pub struct StreamData {
     pub field: String,
     pub value: String,
@@ -126,10 +176,41 @@ impl FromStr for StreamIdInput {
     }
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
 pub struct StreamId {
     pub milliseconds_time: usize,
     pub sequence_number: usize,
+}
+
+impl StreamId {
+    pub fn from_range(range: &str) -> anyhow::Result<StreamId> {
+        let split_s: Vec<_> = range.split("-").collect();
+        if split_s.len() == 2 && split_s[1].len() > 0 {
+            let milliseconds_time = split_s[0]
+                .parse::<usize>()
+                .map_err(|e| anyhow!("Unable to parse stream id ms time, {:?}", e))?;
+
+            let sequence_number = split_s[1]
+                .parse::<usize>()
+                .map_err(|e| anyhow!("Unable to parse stream id seq no, {:?}", e))?;
+
+            Ok(StreamId {
+                milliseconds_time,
+                sequence_number,
+            })
+        } else if split_s.len() == 2 && split_s[1].len() == 0 || split_s.len() == 1 {
+            let milliseconds_time = split_s[0]
+                .parse::<usize>()
+                .map_err(|e| anyhow!("Unable to parse stream range start id ms time, {:?}", e))?;
+            let sequence_number = 0;
+            Ok(StreamId {
+                milliseconds_time,
+                sequence_number,
+            })
+        } else {
+            Err(anyhow!("Unable to parse stream range start"))
+        }
+    }
 }
 
 impl std::fmt::Display for StreamId {

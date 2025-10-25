@@ -354,6 +354,22 @@ impl App {
                     .send(CommandResponse::NonBlocking(response))
                     .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
             }
+            Command::XRange { key, start, end } => {
+                let response = {
+                    match self.map.get_mut(&key) {
+                        Some(RedisDataType::Stream(stream)) => match stream.range(&start, &end) {
+                            Ok(values) => values,
+                            Err(e) => RespValue::SimpleError(e.to_string()),
+                        },
+                        None => RespValue::SimpleError(String::from("Stream not found")),
+                        _ => RespValue::SimpleError(String::from("Wrong type")),
+                    }
+                };
+
+                resp_tx
+                    .send(CommandResponse::NonBlocking(response))
+                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+            }
         }
         Ok(())
     }

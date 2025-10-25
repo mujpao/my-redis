@@ -1029,3 +1029,215 @@ async fn auto_generate_stream_seq_no() {
     let millis: i64 = split_data[0].parse().unwrap();
     DateTime::from_timestamp_millis(millis).expect("timestamp should be valid");
 }
+
+#[tokio::test]
+async fn xrange_works() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let data: String = redis::cmd("XADD")
+        .arg("some_key")
+        .arg("1526985054069-0")
+        .arg("temperature")
+        .arg(36)
+        .arg("humidity")
+        .arg(95)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "1526985054069-0");
+
+    let data: String = redis::cmd("XADD")
+        .arg("some_key")
+        .arg("1526985054079-0")
+        .arg("temperature")
+        .arg(37)
+        .arg("humidity")
+        .arg(94)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "1526985054079-0");
+
+    let expected = redis::Value::Array(vec![
+        redis::Value::Array(vec![
+            redis::Value::BulkString("1526985054069-0".into()),
+            redis::Value::Array(vec![
+                redis::Value::BulkString("temperature".into()),
+                redis::Value::BulkString("36".into()),
+                redis::Value::BulkString("humidity".into()),
+                redis::Value::BulkString("95".into()),
+            ]),
+        ]),
+        redis::Value::Array(vec![
+            redis::Value::BulkString("1526985054079-0".into()),
+            redis::Value::Array(vec![
+                redis::Value::BulkString("temperature".into()),
+                redis::Value::BulkString("37".into()),
+                redis::Value::BulkString("humidity".into()),
+                redis::Value::BulkString("94".into()),
+            ]),
+        ]),
+    ]);
+
+    let data: redis::Value = redis::cmd("XRANGE")
+        .arg("some_key")
+        .arg("1526985054069")
+        .arg("1526985054079")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, expected);
+
+    let expected = redis::Value::Array(vec![redis::Value::Array(vec![
+        redis::Value::BulkString("1526985054069-0".into()),
+        redis::Value::Array(vec![
+            redis::Value::BulkString("temperature".into()),
+            redis::Value::BulkString("36".into()),
+            redis::Value::BulkString("humidity".into()),
+            redis::Value::BulkString("95".into()),
+        ]),
+    ])]);
+
+    let data: redis::Value = redis::cmd("XRANGE")
+        .arg("some_key")
+        .arg("1526985054069-0")
+        .arg("1526985054069-0")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, expected);
+
+    let data: redis::Value = redis::cmd("XRANGE")
+        .arg("some_key")
+        .arg("1")
+        .arg("2")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, redis::Value::Array(vec![]));
+
+    let data: String = redis::cmd("XADD")
+        .arg("stream_key")
+        .arg("0-1")
+        .arg("foo")
+        .arg("bar")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "0-1");
+
+    let data: String = redis::cmd("XADD")
+        .arg("stream_key")
+        .arg("0-2")
+        .arg("bar")
+        .arg("baz")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "0-2");
+
+    let data: String = redis::cmd("XADD")
+        .arg("stream_key")
+        .arg("0-3")
+        .arg("baz")
+        .arg("foo")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "0-3");
+
+    let expected = redis::Value::Array(vec![
+        redis::Value::Array(vec![
+            redis::Value::BulkString("0-1".into()),
+            redis::Value::Array(vec![
+                redis::Value::BulkString("foo".into()),
+                redis::Value::BulkString("bar".into()),
+            ]),
+        ]),
+        redis::Value::Array(vec![
+            redis::Value::BulkString("0-2".into()),
+            redis::Value::Array(vec![
+                redis::Value::BulkString("bar".into()),
+                redis::Value::BulkString("baz".into()),
+            ]),
+        ]),
+        redis::Value::Array(vec![
+            redis::Value::BulkString("0-3".into()),
+            redis::Value::Array(vec![
+                redis::Value::BulkString("baz".into()),
+                redis::Value::BulkString("foo".into()),
+            ]),
+        ]),
+    ]);
+
+    let data: redis::Value = redis::cmd("XRANGE")
+        .arg("stream_key")
+        .arg("0")
+        .arg("1")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, expected);
+
+    let expected = redis::Value::Array(vec![
+        redis::Value::Array(vec![
+            redis::Value::BulkString("0-2".into()),
+            redis::Value::Array(vec![
+                redis::Value::BulkString("bar".into()),
+                redis::Value::BulkString("baz".into()),
+            ]),
+        ]),
+        redis::Value::Array(vec![
+            redis::Value::BulkString("0-3".into()),
+            redis::Value::Array(vec![
+                redis::Value::BulkString("baz".into()),
+                redis::Value::BulkString("foo".into()),
+            ]),
+        ]),
+    ]);
+
+    let data: redis::Value = redis::cmd("XRANGE")
+        .arg("stream_key")
+        .arg("0-2")
+        .arg("0-3")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, expected);
+
+    let expected = redis::Value::Array(vec![
+        redis::Value::Array(vec![
+            redis::Value::BulkString("0-1".into()),
+            redis::Value::Array(vec![
+                redis::Value::BulkString("foo".into()),
+                redis::Value::BulkString("bar".into()),
+            ]),
+        ]),
+        redis::Value::Array(vec![
+            redis::Value::BulkString("0-2".into()),
+            redis::Value::Array(vec![
+                redis::Value::BulkString("bar".into()),
+                redis::Value::BulkString("baz".into()),
+            ]),
+        ]),
+        redis::Value::Array(vec![
+            redis::Value::BulkString("0-3".into()),
+            redis::Value::Array(vec![
+                redis::Value::BulkString("baz".into()),
+                redis::Value::BulkString("foo".into()),
+            ]),
+        ]),
+    ]);
+
+    let data: redis::Value = redis::cmd("XRANGE")
+        .arg("stream_key")
+        .arg("0-1")
+        .arg("0-3")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, expected);
+}

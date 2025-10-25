@@ -44,6 +44,11 @@ pub enum Command {
         id: String,
         pairs: Vec<(String, String)>,
     },
+    XRange {
+        key: String,
+        start: String,
+        end: String,
+    },
 }
 
 #[derive(Debug)]
@@ -357,6 +362,27 @@ impl TryFrom<RespValue> for Command {
                                         pairs,
                                     })
                                 }
+                                _ => {
+                                    println!("invalid command {:?}", resp_value);
+                                    Err(ParseCommandError::InvalidArgument)
+                                }
+                            }
+                        }
+                        "XRANGE" => {
+                            if data.len() != 4 {
+                                println!("invalid command {:?}", resp_value);
+                                return Err(ParseCommandError::WrongNumberArguments);
+                            }
+                            match (&data[1], &data[2], &data[3]) {
+                                (
+                                    RespValue::BulkString(key),
+                                    RespValue::BulkString(start),
+                                    RespValue::BulkString(end),
+                                ) => Ok(Command::XRange {
+                                    key: key.to_string(),
+                                    start: start.to_string(),
+                                    end: end.to_string(),
+                                }),
                                 _ => {
                                     println!("invalid command {:?}", resp_value);
                                     Err(ParseCommandError::InvalidArgument)
