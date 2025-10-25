@@ -79,6 +79,32 @@ impl Stream {
         Ok(id)
     }
 
+    pub fn get_after(&self, last_id: &str) -> Result<RespValue, StreamError> {
+        let last_id = StreamId::from_range(last_id, false).map_err(|e| {
+            println!("{:?}", e);
+            StreamError::InvalidRange
+        })?;
+
+        let mut values_in_range = vec![];
+
+        for (id, data) in self.data.iter() {
+            if *id > last_id {
+                let mut value_as_resp = vec![RespValue::BulkString(id.to_string())];
+
+                let mut fields = vec![];
+                for StreamData { field, value } in data {
+                    fields.push(RespValue::BulkString(field.into()));
+                    fields.push(RespValue::BulkString(value.into()));
+                }
+
+                value_as_resp.push(RespValue::Array(fields));
+                values_in_range.push(RespValue::Array(value_as_resp));
+            }
+        }
+
+        Ok(RespValue::Array(values_in_range))
+    }
+
     pub fn range(&self, start: &str, end: &str) -> Result<RespValue, StreamError> {
         let mut common_idx = 0;
         for i in 0..std::cmp::min(start.len(), end.len()) {
@@ -91,10 +117,12 @@ impl Stream {
         }
 
         let common_prefix = if common_idx > 0 {
-            Some(StreamId::from_range(&start[0..common_idx], false).map_err(|e| {
-                println!("{:?}", e);
-                StreamError::InvalidRange
-            })?)
+            Some(
+                StreamId::from_range(&start[0..common_idx], false).map_err(|e| {
+                    println!("{:?}", e);
+                    StreamError::InvalidRange
+                })?,
+            )
         } else {
             None
         };
@@ -115,12 +143,10 @@ impl Stream {
                 milliseconds_time: usize::MAX,
                 sequence_number: usize::MAX,
             },
-            end => {
-                 StreamId::from_range(end, true).map_err(|e| {
-                    println!("{:?}", e);
-                    StreamError::InvalidRange
-                })?
-            }
+            end => StreamId::from_range(end, true).map_err(|e| {
+                println!("{:?}", e);
+                StreamError::InvalidRange
+            })?,
         };
 
         let ancestor_iter = match common_prefix {
@@ -225,11 +251,7 @@ impl StreamId {
             let milliseconds_time = split_s[0]
                 .parse::<usize>()
                 .map_err(|e| anyhow!("Unable to parse stream range start id ms time, {:?}", e))?;
-            let sequence_number = if end {
-                usize::MAX
-            } else {
-                0
-            };
+            let sequence_number = if end { usize::MAX } else { 0 };
             Ok(StreamId {
                 milliseconds_time,
                 sequence_number,

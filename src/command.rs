@@ -49,6 +49,9 @@ pub enum Command {
         start: String,
         end: String,
     },
+    XRead {
+        keys_and_ids: Vec<(String, String)>,
+    },
 }
 
 #[derive(Debug)]
@@ -388,6 +391,48 @@ impl TryFrom<RespValue> for Command {
                                     Err(ParseCommandError::InvalidArgument)
                                 }
                             }
+                        }
+                        "XREAD" => {
+                            if data.len() < 4 {
+                                println!("invalid command {:?}", resp_value);
+                                return Err(ParseCommandError::WrongNumberArguments);
+                            }
+
+                            match &data[1] {
+                                RespValue::BulkString(s) => {
+                                    if s.as_str().to_uppercase().as_str() != "STREAMS" {
+                                        println!("invalid command {:?}", resp_value);
+                                        return Err(ParseCommandError::InvalidArgument);
+                                    }
+                                }
+                                _ => {
+                                    println!("invalid command {:?}", resp_value);
+                                    return Err(ParseCommandError::InvalidArgument);
+                                }
+                            }
+
+                            if (data.len() - 2) % 2 != 0 {
+                                println!("invalid command {:?}", resp_value);
+                                return Err(ParseCommandError::WrongNumberArguments);
+                            }
+
+                            let mut pairs = vec![];
+                            let num_pairs = (data.len() - 2) / 2;
+                            for i in 0..num_pairs {
+                                match (&data[2 + i], &data[2 + i + num_pairs]) {
+                                    (RespValue::BulkString(key), RespValue::BulkString(id)) => {
+                                        pairs.push((key.to_string(), id.to_string()))
+                                    }
+                                    _ => {
+                                        println!("invalid command {:?}", resp_value);
+                                        return Err(ParseCommandError::InvalidArgument);
+                                    }
+                                }
+                            }
+
+                            Ok(Command::XRead {
+                                keys_and_ids: pairs,
+                            })
                         }
                         _ => {
                             println!("unknown command {:?}", resp_value);

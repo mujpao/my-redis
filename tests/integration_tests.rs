@@ -1295,7 +1295,7 @@ async fn xrange_works() {
         .unwrap();
     assert_eq!(data, expected);
 
-     let expected = redis::Value::Array(vec![
+    let expected = redis::Value::Array(vec![
         redis::Value::Array(vec![
             redis::Value::BulkString("0-1".into()),
             redis::Value::Array(vec![
@@ -1321,10 +1321,132 @@ async fn xrange_works() {
         .unwrap();
     assert_eq!(data, expected);
 
-        let data: redis::Value = redis::cmd("XRANGE")
+    let data: redis::Value = redis::cmd("XRANGE")
         .arg("stream_key")
         .arg("-")
         .arg("0-2")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, expected);
+}
+
+#[tokio::test]
+async fn xread_works() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let data: String = redis::cmd("XADD")
+        .arg("stream_key")
+        .arg("0-1")
+        .arg("foo")
+        .arg("bar")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "0-1");
+
+    let data: String = redis::cmd("XADD")
+        .arg("stream_key")
+        .arg("0-2")
+        .arg("bar")
+        .arg("baz")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "0-2");
+
+    let data: String = redis::cmd("XADD")
+        .arg("stream_key")
+        .arg("0-3")
+        .arg("baz")
+        .arg("foo")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "0-3");
+
+    let stream_key_entries = redis::Value::Array(vec![
+        redis::Value::Array(vec![
+            redis::Value::BulkString("0-2".into()),
+            redis::Value::Array(vec![
+                redis::Value::BulkString("bar".into()),
+                redis::Value::BulkString("baz".into()),
+            ]),
+        ]),
+        redis::Value::Array(vec![
+            redis::Value::BulkString("0-3".into()),
+            redis::Value::Array(vec![
+                redis::Value::BulkString("baz".into()),
+                redis::Value::BulkString("foo".into()),
+            ]),
+        ]),
+    ]);
+
+    let stream_key = redis::Value::Array(vec![
+        redis::Value::BulkString("stream_key".into()),
+        stream_key_entries,
+    ]);
+
+    let expected = redis::Value::Array(vec![stream_key.clone()]);
+
+    let data: redis::Value = redis::cmd("XREAD")
+        .arg("STREAMS")
+        .arg("stream_key")
+        .arg("0-1")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, expected);
+
+    let data: String = redis::cmd("XADD")
+        .arg("some_key")
+        .arg("1526985054069-0")
+        .arg("temperature")
+        .arg(36)
+        .arg("humidity")
+        .arg(95)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "1526985054069-0");
+
+    let data: String = redis::cmd("XADD")
+        .arg("some_key")
+        .arg("1526985054079-0")
+        .arg("temperature")
+        .arg(37)
+        .arg("humidity")
+        .arg(94)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "1526985054079-0");
+
+    let some_key_entries = redis::Value::Array(vec![redis::Value::Array(vec![
+        redis::Value::BulkString("1526985054079-0".into()),
+        redis::Value::Array(vec![
+            redis::Value::BulkString("temperature".into()),
+            redis::Value::BulkString("37".into()),
+            redis::Value::BulkString("humidity".into()),
+            redis::Value::BulkString("94".into()),
+        ]),
+    ])]);
+
+    let some_key = redis::Value::Array(vec![
+        redis::Value::BulkString("some_key".into()),
+        some_key_entries,
+    ]);
+
+    let expected = redis::Value::Array(vec![stream_key, some_key]);
+    let data: redis::Value = redis::cmd("XREAD")
+        .arg("STREAMS")
+        .arg("stream_key")
+        .arg("some_key")
+        .arg("0-1")
+        .arg("1526985054069-0")
         .query_async(&mut conn)
         .await
         .unwrap();

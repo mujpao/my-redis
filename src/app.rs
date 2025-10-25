@@ -370,6 +370,35 @@ impl App {
                     .send(CommandResponse::NonBlocking(response))
                     .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
             }
+            Command::XRead { keys_and_ids } => {
+                let response = {
+                    let mut result = vec![];
+                    for (key, last_id) in keys_and_ids {
+                        let stream_data = {
+                            match self.map.get_mut(&key) {
+                                Some(RedisDataType::Stream(stream)) => {
+                                    match stream.get_after(&last_id) {
+                                        Ok(values) => values,
+                                        Err(e) => RespValue::SimpleError(e.to_string()),
+                                    }
+                                }
+                                None => RespValue::SimpleError(String::from("Stream not found")),
+                                _ => RespValue::SimpleError(String::from("Key is not a stream")),
+                            }
+                        };
+
+                        let stream_data =
+                            RespValue::Array(vec![RespValue::BulkString(key.into()), stream_data]);
+                        result.push(stream_data);
+                    }
+
+                    result
+                };
+
+                resp_tx
+                    .send(CommandResponse::NonBlocking(RespValue::Array(response)))
+                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+            }
         }
         Ok(())
     }
