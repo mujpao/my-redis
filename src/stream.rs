@@ -91,7 +91,7 @@ impl Stream {
         }
 
         let common_prefix = if common_idx > 0 {
-            Some(StreamId::from_range(&start[0..common_idx]).map_err(|e| {
+            Some(StreamId::from_range(&start[0..common_idx], false).map_err(|e| {
                 println!("{:?}", e);
                 StreamError::InvalidRange
             })?)
@@ -104,7 +104,7 @@ impl Stream {
                 milliseconds_time: 0,
                 sequence_number: 0,
             },
-            start => StreamId::from_range(start).map_err(|e| {
+            start => StreamId::from_range(start, false).map_err(|e| {
                 println!("{:?}", e);
                 StreamError::InvalidRange
             })?,
@@ -116,12 +116,10 @@ impl Stream {
                 sequence_number: usize::MAX,
             },
             end => {
-                let mut end = StreamId::from_range(end).map_err(|e| {
+                 StreamId::from_range(end, true).map_err(|e| {
                     println!("{:?}", e);
                     StreamError::InvalidRange
-                })?;
-                end.sequence_number = usize::MAX;
-                end
+                })?
             }
         };
 
@@ -208,7 +206,7 @@ pub struct StreamId {
 }
 
 impl StreamId {
-    pub fn from_range(range: &str) -> anyhow::Result<StreamId> {
+    pub fn from_range(range: &str, end: bool) -> anyhow::Result<StreamId> {
         let split_s: Vec<_> = range.split("-").collect();
         if split_s.len() == 2 && split_s[1].len() > 0 {
             let milliseconds_time = split_s[0]
@@ -227,7 +225,11 @@ impl StreamId {
             let milliseconds_time = split_s[0]
                 .parse::<usize>()
                 .map_err(|e| anyhow!("Unable to parse stream range start id ms time, {:?}", e))?;
-            let sequence_number = 0;
+            let sequence_number = if end {
+                usize::MAX
+            } else {
+                0
+            };
             Ok(StreamId {
                 milliseconds_time,
                 sequence_number,

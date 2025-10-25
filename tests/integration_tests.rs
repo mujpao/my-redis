@@ -1294,4 +1294,39 @@ async fn xrange_works() {
         .await
         .unwrap();
     assert_eq!(data, expected);
+
+     let expected = redis::Value::Array(vec![
+        redis::Value::Array(vec![
+            redis::Value::BulkString("0-1".into()),
+            redis::Value::Array(vec![
+                redis::Value::BulkString("foo".into()),
+                redis::Value::BulkString("bar".into()),
+            ]),
+        ]),
+        redis::Value::Array(vec![
+            redis::Value::BulkString("0-2".into()),
+            redis::Value::Array(vec![
+                redis::Value::BulkString("bar".into()),
+                redis::Value::BulkString("baz".into()),
+            ]),
+        ]),
+    ]);
+
+    let data: redis::Value = redis::cmd("XRANGE")
+        .arg("stream_key")
+        .arg("0-1")
+        .arg("0-2")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, expected);
+
+        let data: redis::Value = redis::cmd("XRANGE")
+        .arg("stream_key")
+        .arg("-")
+        .arg("0-2")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, expected);
 }
