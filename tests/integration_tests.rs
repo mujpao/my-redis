@@ -1701,3 +1701,88 @@ async fn xread_blocking_works() {
 
     handle2.await.unwrap();
 }
+
+#[tokio::test]
+async fn xread_blocking_with_dollar_sign_id() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let data: String = redis::cmd("XADD")
+        .arg("stream_key")
+        .arg("0-1")
+        .arg("foo")
+        .arg("bar")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "0-1");
+
+    let data: redis::Value = redis::cmd("XREAD")
+        .arg("BLOCK")
+        .arg(100)
+        .arg("STREAMS")
+        .arg("stream_key")
+        .arg("$")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, redis::Value::Nil);
+
+    let client2 = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn2 = client2.get_multiplexed_async_connection().await.unwrap();
+
+    let handle = tokio::spawn(async move {
+        sleep(Duration::from_millis(50)).await;
+
+        let data: String = redis::cmd("XADD")
+            .arg("stream_key")
+            .arg("0-2")
+            .arg("bar")
+            .arg("baz")
+            .query_async(&mut conn2)
+            .await
+            .unwrap();
+        assert_eq!(data, "0-2");
+    });
+
+    let stream_key_entries = redis::Value::Array(vec![redis::Value::Array(vec![
+        redis::Value::BulkString("0-2".into()),
+        redis::Value::Array(vec![
+            redis::Value::BulkString("bar".into()),
+            redis::Value::BulkString("baz".into()),
+        ]),
+    ])]);
+
+    let stream_key1 = redis::Value::Array(vec![
+        redis::Value::BulkString("stream_key".into()),
+        stream_key_entries,
+    ]);
+
+    let expected = redis::Value::Array(vec![stream_key1]);
+
+    let data: redis::Value = redis::cmd("XREAD")
+        .arg("BLOCK")
+        .arg(500)
+        .arg("STREAMS")
+        .arg("stream_key")
+        .arg("$")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, expected);
+
+    handle.await.unwrap();
+
+    let data: redis::Value = redis::cmd("XREAD")
+        .arg("BLOCK")
+        .arg(100)
+        .arg("STREAMS")
+        .arg("stream_key")
+        .arg("$")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, redis::Value::Nil);
+}

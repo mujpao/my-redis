@@ -30,7 +30,7 @@ struct BLPopListener {
 struct XReadListener {
     tx: mpsc::Sender<RespValue>,
     expires_at: Option<Instant>,
-    last_seen_id: String,
+    last_seen_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -392,11 +392,19 @@ impl App {
             } => {
                 let response = {
                     let mut result = vec![];
+                    let mut pairs = vec![];
                     for (key, last_id) in &keys_and_ids {
                         let stream_data = {
                             match self.map.get_mut(key) {
                                 Some(RedisDataType::Stream(stream)) => {
-                                    match stream.get_after_id(&last_id) {
+                                    let last_id = match last_id.as_str() {
+                                        "$" => stream.get_last_id(),
+                                        id => Some(id.to_string()),
+                                    };
+
+                                    pairs.push((key.to_string(), last_id.clone()));
+
+                                    match stream.get_after_id(last_id.as_deref()) {
                                         Ok(values) => {
                                             if values.len() > 0 {
                                                 RespValue::Array(values)
@@ -435,7 +443,7 @@ impl App {
                                 }
                             };
 
-                            self.add_xread_listeners(&keys_and_ids, tx, expires_at)?;
+                            self.add_xread_listeners(&pairs, tx, expires_at)?;
 
                             CommandResponse::BlockingMpsc((rx, duration))
                         } else {
@@ -456,17 +464,15 @@ impl App {
 
     fn add_xread_listeners(
         &mut self,
-        pairs: &Vec<(String, String)>,
+        pairs: &Vec<(String, Option<String>)>,
         tx: mpsc::Sender<RespValue>,
         expires_at: Option<Instant>,
     ) -> anyhow::Result<()> {
-        println!("expires at: {:?}", expires_at);
-
-        for (key, value) in pairs {
+        for (key, last_id) in pairs {
             let listener = XReadListener {
                 tx: tx.clone(),
                 expires_at: expires_at,
-                last_seen_id: value.to_string(),
+                last_seen_id: last_id.clone(),
             };
 
             let listeners = self
@@ -504,7 +510,7 @@ impl App {
                     }
 
                     if let Some(RedisDataType::Stream(stream)) = self.map.get_mut(key) {
-                        match stream.get_after_id(&listener.last_seen_id) {
+                        match stream.get_after_id(listener.last_seen_id.as_deref()) {
                             Ok(values) => {
                                 // Only notify the listener if there are new values in stream
                                 if values.len() > 0 {
@@ -589,8 +595,6 @@ async fn accept_listeners(
                 let value = connection.read_value().await;
 
                 if let Some(value) = value? {
-                    // println!("read {:?}", value);
-
                     match Command::try_from(value) {
                         Ok(command) => {
                             let (resp_tx, resp_rx) = oneshot::channel();

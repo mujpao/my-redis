@@ -79,27 +79,33 @@ impl Stream {
         Ok(id)
     }
 
-    pub fn get_after_id(&self, last_id: &str) -> Result<Vec<RespValue>, StreamError> {
-        let last_id = StreamId::from_range(last_id, false).map_err(|e| {
-            println!("{:?}", e);
-            StreamError::InvalidRange
-        })?;
+    pub fn get_after_id(&self, last_id: Option<&str>) -> Result<Vec<RespValue>, StreamError> {
+        let last_id = match last_id {
+            Some(id) => Some(StreamId::from_range(id, false).map_err(|e| {
+                println!("{:?}", e);
+                StreamError::InvalidRange
+            })?),
+            None => None,
+        };
 
         let mut values_in_range = vec![];
 
         for (id, data) in self.data.iter() {
-            if *id > last_id {
-                let mut value_as_resp = vec![RespValue::BulkString(id.to_string())];
-
-                let mut fields = vec![];
-                for StreamData { field, value } in data {
-                    fields.push(RespValue::BulkString(field.into()));
-                    fields.push(RespValue::BulkString(value.into()));
+            if let Some(ref last_id) = last_id {
+                if *id <= *last_id {
+                    continue;
                 }
-
-                value_as_resp.push(RespValue::Array(fields));
-                values_in_range.push(RespValue::Array(value_as_resp));
             }
+            let mut value_as_resp = vec![RespValue::BulkString(id.to_string())];
+
+            let mut fields = vec![];
+            for StreamData { field, value } in data {
+                fields.push(RespValue::BulkString(field.into()));
+                fields.push(RespValue::BulkString(value.into()));
+            }
+
+            value_as_resp.push(RespValue::Array(fields));
+            values_in_range.push(RespValue::Array(value_as_resp));
         }
 
         Ok(values_in_range)
@@ -175,6 +181,10 @@ impl Stream {
         }
 
         Ok(RespValue::Array(values_in_range))
+    }
+
+    pub fn get_last_id(&self) -> Option<String> {
+        self.last_entry_id.as_ref().map(|id| id.to_string())
     }
 }
 
