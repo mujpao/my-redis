@@ -27,14 +27,23 @@ struct BLPopListener {
 }
 
 #[derive(Debug)]
+struct XReadListener {
+    tx: mpsc::Sender<RespValue>,
+    expires_at: Option<Instant>,
+    last_seen_id: String,
+}
+
+#[derive(Debug)]
 enum CommandResponse {
     NonBlocking(RespValue),
-    Blocking((oneshot::Receiver<RespValue>, Option<Duration>)),
+    BlockingOneshot((oneshot::Receiver<RespValue>, Option<Duration>)),
+    BlockingMpsc((mpsc::Receiver<RespValue>, Option<Duration>)),
 }
 
 pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
     let map = HashMap::new();
     let blpop_listeners = HashMap::new();
+    let xread_listeners = HashMap::new();
 
     let (command_tx, command_rx) = mpsc::channel(100);
     let (events_tx, events_rx) = mpsc::channel(100);
@@ -42,6 +51,7 @@ pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
     let mut app = App {
         map,
         blpop_listeners,
+        xread_listeners,
         command_rx,
         events_tx,
         events_rx,
@@ -61,6 +71,7 @@ enum AppEvent {
 struct App {
     map: Map,
     blpop_listeners: HashMap<String, Vec<BLPopListener>>,
+    xread_listeners: HashMap<String, VecDeque<XReadListener>>,
     command_rx: mpsc::Receiver<(Command, oneshot::Sender<CommandResponse>)>,
     events_tx: mpsc::Sender<AppEvent>,
     events_rx: mpsc::Receiver<AppEvent>,
@@ -116,6 +127,7 @@ impl App {
         command: Command,
         resp_tx: oneshot::Sender<CommandResponse>,
     ) -> anyhow::Result<()> {
+        println!("received command: {:?}", command);
         match command {
             Command::Ping => {
                 let response = RespValue::SimpleString(String::from("PONG"));
@@ -297,7 +309,7 @@ impl App {
                             .entry(key.to_string())
                             .or_insert_with(|| Vec::new());
                         list.push(BLPopListener { tx, expires_at });
-                        CommandResponse::Blocking((rx, duration))
+                        CommandResponse::BlockingOneshot((rx, duration))
                     }
                 };
 
@@ -334,8 +346,10 @@ impl App {
                                 let mut stream = Stream::new();
                                 match stream.append(id, data) {
                                     Ok(id) => {
-                                        self.map
-                                            .insert(key, RedisDataType::Stream(Box::new(stream)));
+                                        self.map.insert(
+                                            key.clone(),
+                                            RedisDataType::Stream(Box::new(stream)),
+                                        );
                                         RespValue::BulkString(id.to_string())
                                     }
                                     Err(e) => RespValue::SimpleError(e.to_string()),
@@ -353,6 +367,8 @@ impl App {
                 resp_tx
                     .send(CommandResponse::NonBlocking(response))
                     .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+
+                self.notify_xread_listeners(&key).await?;
             }
             Command::XRange { key, start, end } => {
                 let response = {
@@ -370,15 +386,24 @@ impl App {
                     .send(CommandResponse::NonBlocking(response))
                     .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
             }
-            Command::XRead { keys_and_ids } => {
+            Command::XRead {
+                keys_and_ids,
+                timeout,
+            } => {
                 let response = {
                     let mut result = vec![];
-                    for (key, last_id) in keys_and_ids {
+                    for (key, last_id) in &keys_and_ids {
                         let stream_data = {
-                            match self.map.get_mut(&key) {
+                            match self.map.get_mut(key) {
                                 Some(RedisDataType::Stream(stream)) => {
-                                    match stream.get_after(&last_id) {
-                                        Ok(values) => values,
+                                    match stream.get_after_id(&last_id) {
+                                        Ok(values) => {
+                                            if values.len() > 0 {
+                                                RespValue::Array(values)
+                                            } else {
+                                                RespValue::NullArray
+                                            }
+                                        }
                                         Err(e) => RespValue::SimpleError(e.to_string()),
                                     }
                                 }
@@ -387,18 +412,115 @@ impl App {
                             }
                         };
 
-                        let stream_data =
-                            RespValue::Array(vec![RespValue::BulkString(key.into()), stream_data]);
-                        result.push(stream_data);
+                        if let RespValue::Array(_) = stream_data {
+                            let stream_data = RespValue::Array(vec![
+                                RespValue::BulkString(key.into()),
+                                stream_data,
+                            ]);
+                            result.push(stream_data);
+                        }
                     }
 
-                    result
+                    if result.len() == 0 {
+                        if let Some(timeout) = timeout {
+                            let (tx, rx) = mpsc::channel(1);
+                            let duration = Duration::from_millis(timeout);
+
+                            let expires_at = Instant::now() + duration;
+                            self.add_xread_listeners(&keys_and_ids, tx, expires_at)?;
+
+                            CommandResponse::BlockingMpsc((rx, Some(duration)))
+                        } else {
+                            CommandResponse::NonBlocking(RespValue::NullArray)
+                        }
+                    } else {
+                        CommandResponse::NonBlocking(RespValue::Array(result))
+                    }
                 };
 
                 resp_tx
-                    .send(CommandResponse::NonBlocking(RespValue::Array(response)))
+                    .send(response)
                     .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
             }
+        }
+        Ok(())
+    }
+
+    fn add_xread_listeners(
+        &mut self,
+        pairs: &Vec<(String, String)>,
+        tx: mpsc::Sender<RespValue>,
+        expires_at: Instant,
+    ) -> anyhow::Result<()> {
+        println!("expires at: {:?}", expires_at);
+
+        for (key, value) in pairs {
+            let listener = XReadListener {
+                tx: tx.clone(),
+                expires_at: Some(expires_at),
+                last_seen_id: value.to_string(),
+            };
+
+            let listeners = self
+                .xread_listeners
+                .entry(key.to_string())
+                .or_insert_with(|| VecDeque::new());
+            listeners.push_back(listener);
+        }
+
+        Ok(())
+    }
+
+    async fn notify_xread_listeners(&mut self, key: &String) -> anyhow::Result<()> {
+        match self.xread_listeners.remove(key) {
+            Some(mut listeners) => {
+                let mut new_listeners = VecDeque::new();
+
+                while !listeners.is_empty() {
+                    let listener = listeners
+                        .pop_front()
+                        .ok_or_else(|| anyhow!("listeners is empty"))?;
+
+                    if listener.tx.is_closed() {
+                        println!("xread channel has closed");
+                        continue;
+                    }
+
+                    if let Some(expires_at) = listener.expires_at {
+                        if expires_at < Instant::now() {
+                            println!("xread listener has expired");
+                            let to_send = RespValue::NullArray;
+                            let _ = listener.tx.send(to_send).await;
+                            continue;
+                        }
+                    }
+
+                    if let Some(RedisDataType::Stream(stream)) = self.map.get_mut(key) {
+                        match stream.get_after_id(&listener.last_seen_id) {
+                            Ok(values) => {
+                                // Only notify the listener if there are new values in stream
+                                if values.len() > 0 {
+                                    let to_send = RespValue::Array(vec![RespValue::Array(vec![
+                                        RespValue::BulkString(key.into()),
+                                        RespValue::Array(values),
+                                    ])]);
+
+                                    let _ = listener.tx.send(to_send).await;
+                                    continue;
+                                }
+                            }
+                            Err(e) => {
+                                println!("error getting stream: {:?}", e);
+                            }
+                        }
+                    }
+
+                    new_listeners.push_back(listener);
+                }
+
+                self.xread_listeners.insert(key.clone(), new_listeners);
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -459,7 +581,7 @@ async fn accept_listeners(
                 let value = connection.read_value().await;
 
                 if let Some(value) = value? {
-                    println!("read {:?}", value);
+                    // println!("read {:?}", value);
 
                     match Command::try_from(value) {
                         Ok(command) => {
@@ -469,12 +591,39 @@ async fn accept_listeners(
                             let response = resp_rx.await?;
                             let to_send = match response {
                                 CommandResponse::NonBlocking(response) => response,
-                                CommandResponse::Blocking((rx, duration)) => match duration {
-                                    Some(duration) => match timeout(duration, rx).await {
-                                        Ok(Ok(value)) => value,
-                                        _ => RespValue::NullArray,
+                                CommandResponse::BlockingOneshot((rx, duration)) => {
+                                    match duration {
+                                        Some(duration) => match timeout(duration, rx).await {
+                                            Ok(Ok(value)) => value,
+                                            _ => RespValue::NullArray,
+                                        },
+                                        None => rx.await?,
+                                    }
+                                }
+                                CommandResponse::BlockingMpsc((mut rx, duration)) => match duration
+                                {
+                                    Some(duration) => match timeout(duration, rx.recv()).await {
+                                        Ok(Some(value)) => {
+                                            println!("got {:?} from mpsc channel", value);
+                                            rx.close();
+                                            value
+                                        }
+                                        e => {
+                                            println!(
+                                                "timeout reached for blocking mpsc receive, {:?}",
+                                                e
+                                            );
+                                            RespValue::NullArray
+                                        }
                                     },
-                                    None => rx.await?,
+                                    None => {
+                                        let value = rx
+                                            .recv()
+                                            .await
+                                            .ok_or_else(|| anyhow!("error on blocking receiver"))?;
+                                        rx.close();
+                                        value
+                                    }
                                 },
                             };
 

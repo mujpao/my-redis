@@ -1,6 +1,7 @@
 use crate::resp::RespValue;
 use std::time::Duration;
 
+#[derive(Debug)]
 pub enum Command {
     Ping,
     Echo(String),
@@ -51,6 +52,7 @@ pub enum Command {
     },
     XRead {
         keys_and_ids: Vec<(String, String)>,
+        timeout: Option<u64>,
     },
 }
 
@@ -398,18 +400,42 @@ impl TryFrom<RespValue> for Command {
                                 return Err(ParseCommandError::WrongNumberArguments);
                             }
 
-                            match &data[1] {
+                            let (timeout, pairs_start_idx) = match &data[1] {
                                 RespValue::BulkString(s) => {
-                                    if s.as_str().to_uppercase().as_str() != "STREAMS" {
-                                        println!("invalid command {:?}", resp_value);
-                                        return Err(ParseCommandError::InvalidArgument);
+                                    match s.as_str().to_uppercase().as_str() {
+                                        "STREAMS" => (None, 2),
+                                        "BLOCK" => {
+                                            if data.len() < 6 {
+                                                println!("invalid command {:?}", resp_value);
+                                                return Err(
+                                                    ParseCommandError::WrongNumberArguments,
+                                                );
+                                            }
+
+                                            if let RespValue::BulkString(timeout) = &data[2] {
+                                                let timeout: u64 =
+                                                    timeout.parse().map_err(|e| {
+                                                        println!("error parsing integer: {:?}", e);
+                                                        ParseCommandError::InvalidArgument
+                                                    })?;
+
+                                                (Some(timeout), 4)
+                                            } else {
+                                                println!("invalid command {:?}", resp_value);
+                                                return Err(ParseCommandError::InvalidArgument);
+                                            }
+                                        }
+                                        _ => {
+                                            println!("invalid command {:?}", resp_value);
+                                            return Err(ParseCommandError::InvalidArgument);
+                                        }
                                     }
                                 }
                                 _ => {
                                     println!("invalid command {:?}", resp_value);
                                     return Err(ParseCommandError::InvalidArgument);
                                 }
-                            }
+                            };
 
                             if (data.len() - 2) % 2 != 0 {
                                 println!("invalid command {:?}", resp_value);
@@ -417,9 +443,12 @@ impl TryFrom<RespValue> for Command {
                             }
 
                             let mut pairs = vec![];
-                            let num_pairs = (data.len() - 2) / 2;
+                            let num_pairs = (data.len() - pairs_start_idx) / 2;
                             for i in 0..num_pairs {
-                                match (&data[2 + i], &data[2 + i + num_pairs]) {
+                                match (
+                                    &data[pairs_start_idx + i],
+                                    &data[pairs_start_idx + i + num_pairs],
+                                ) {
                                     (RespValue::BulkString(key), RespValue::BulkString(id)) => {
                                         pairs.push((key.to_string(), id.to_string()))
                                     }
@@ -432,6 +461,7 @@ impl TryFrom<RespValue> for Command {
 
                             Ok(Command::XRead {
                                 keys_and_ids: pairs,
+                                timeout,
                             })
                         }
                         _ => {

@@ -1617,6 +1617,7 @@ async fn xread_blocking_works() {
     let handle2 = tokio::spawn(async move {
         sleep(Duration::from_millis(50)).await;
 
+        println!("calling xadd");
         let data: String = redis::cmd("XADD")
             .arg("stream_key1")
             .arg("0-2")
@@ -1645,7 +1646,7 @@ async fn xread_blocking_works() {
 
     let data: redis::Value = redis::cmd("XREAD")
         .arg("BLOCK")
-        .arg(300)
+        .arg(500)
         .arg("STREAMS")
         .arg("stream_key1")
         .arg("stream_key2")

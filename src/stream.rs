@@ -79,7 +79,7 @@ impl Stream {
         Ok(id)
     }
 
-    pub fn get_after(&self, last_id: &str) -> Result<RespValue, StreamError> {
+    pub fn get_after_id(&self, last_id: &str) -> Result<Vec<RespValue>, StreamError> {
         let last_id = StreamId::from_range(last_id, false).map_err(|e| {
             println!("{:?}", e);
             StreamError::InvalidRange
@@ -102,7 +102,7 @@ impl Stream {
             }
         }
 
-        Ok(RespValue::Array(values_in_range))
+        Ok(values_in_range)
     }
 
     pub fn range(&self, start: &str, end: &str) -> Result<RespValue, StreamError> {
