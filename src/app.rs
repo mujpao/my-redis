@@ -424,12 +424,20 @@ impl App {
                     if result.len() == 0 {
                         if let Some(timeout) = timeout {
                             let (tx, rx) = mpsc::channel(1);
-                            let duration = Duration::from_millis(timeout);
+                            let (duration, expires_at) = {
+                                match timeout {
+                                    0 => (None, None),
+                                    timeout => {
+                                        let duration = Duration::from_millis(timeout);
+                                        let expires_at = Instant::now() + duration;
+                                        (Some(duration), Some(expires_at))
+                                    }
+                                }
+                            };
 
-                            let expires_at = Instant::now() + duration;
                             self.add_xread_listeners(&keys_and_ids, tx, expires_at)?;
 
-                            CommandResponse::BlockingMpsc((rx, Some(duration)))
+                            CommandResponse::BlockingMpsc((rx, duration))
                         } else {
                             CommandResponse::NonBlocking(RespValue::NullArray)
                         }
@@ -450,14 +458,14 @@ impl App {
         &mut self,
         pairs: &Vec<(String, String)>,
         tx: mpsc::Sender<RespValue>,
-        expires_at: Instant,
+        expires_at: Option<Instant>,
     ) -> anyhow::Result<()> {
         println!("expires at: {:?}", expires_at);
 
         for (key, value) in pairs {
             let listener = XReadListener {
                 tx: tx.clone(),
-                expires_at: Some(expires_at),
+                expires_at: expires_at,
                 last_seen_id: value.to_string(),
             };
 

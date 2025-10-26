@@ -1617,7 +1617,6 @@ async fn xread_blocking_works() {
     let handle2 = tokio::spawn(async move {
         sleep(Duration::from_millis(50)).await;
 
-        println!("calling xadd");
         let data: String = redis::cmd("XADD")
             .arg("stream_key1")
             .arg("0-2")
@@ -1652,6 +1651,47 @@ async fn xread_blocking_works() {
         .arg("stream_key2")
         .arg("stream_key3")
         .arg("0-1")
+        .arg("0-1")
+        .arg("0-1")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, expected);
+
+    handle2.await.unwrap();
+
+    let client3 = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn3 = client3.get_multiplexed_async_connection().await.unwrap();
+
+    let handle2 = tokio::spawn(async move {
+        sleep(Duration::from_millis(50)).await;
+
+        let data: String = redis::cmd("XADD")
+            .arg("stream_key2")
+            .arg("0-2")
+            .arg("bar")
+            .arg("baz")
+            .query_async(&mut conn3)
+            .await
+            .unwrap();
+        assert_eq!(data, "0-2");
+    });
+
+    let stream_key2 = redis::Value::Array(vec![
+        redis::Value::BulkString("stream_key2".into()),
+        stream_key_entries.clone(),
+    ]);
+
+    let expected = redis::Value::Array(vec![stream_key2]);
+
+    let data: redis::Value = redis::cmd("XREAD")
+        .arg("BLOCK")
+        .arg(0)
+        .arg("STREAMS")
+        .arg("stream_key1")
+        .arg("stream_key2")
+        .arg("stream_key3")
+        .arg("0-2")
         .arg("0-1")
         .arg("0-1")
         .query_async(&mut conn)
