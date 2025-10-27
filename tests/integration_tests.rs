@@ -1786,3 +1786,95 @@ async fn xread_blocking_with_dollar_sign_id() {
         .unwrap();
     assert_eq!(data, redis::Value::Nil);
 }
+
+#[tokio::test]
+async fn incr_works() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let data: String = redis::cmd("SET")
+        .arg("foo")
+        .arg(5)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "OK");
+
+    let data: i64 = redis::cmd("INCR")
+        .arg("foo")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, 6);
+
+    let data: i64 = redis::cmd("GET")
+        .arg("foo")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, 6);
+
+    let data: i64 = redis::cmd("INCR")
+        .arg("foo")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, 7);
+
+    let data: i64 = redis::cmd("GET")
+        .arg("foo")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, 7);
+
+    let data: String = redis::cmd("XADD")
+        .arg("some_key")
+        .arg("0-1")
+        .arg("bar")
+        .arg("baz")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "0-1");
+
+    let err: Result<String, redis::RedisError> = redis::cmd("INCR")
+        .arg("some_key")
+        .query_async(&mut conn)
+        .await;
+    assert_eq!(
+        err.unwrap_err().detail().unwrap(),
+        "Operation against a key holding the wrong kind of value"
+    );
+
+    let data: String = redis::cmd("SET")
+        .arg("bar")
+        .arg("foo")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "OK");
+
+    let err: Result<String, redis::RedisError> =
+        redis::cmd("INCR").arg("bar").query_async(&mut conn).await;
+    assert_eq!(
+        err.unwrap_err().detail().unwrap(),
+        "value is not an integer or out of range"
+    );
+
+    let data: i64 = redis::cmd("INCR")
+        .arg("a")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, 1);
+
+    let data: i64 = redis::cmd("GET")
+        .arg("a")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, 1);
+}

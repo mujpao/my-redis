@@ -458,6 +458,34 @@ impl App {
                     .send(response)
                     .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
             }
+            Command::Incr { key } => {
+                let response = match self.map.get_mut(&key) {
+                    Some(RedisDataType::String(b)) => match b.0.parse::<i64>() {
+                        Ok(int_value) => {
+                            b.0 = (int_value + 1).to_string();
+                            RespValue::BulkString(b.0.clone())
+                        }
+                        Err(_) => RespValue::SimpleError(String::from(
+                            "ERR value is not an integer or out of range",
+                        )),
+                    },
+                    None => {
+                        let new_value = String::from("1");
+                        self.map.insert(
+                            key.to_string(),
+                            RedisDataType::String(Box::new((new_value.clone(), None))),
+                        );
+                        RespValue::BulkString(new_value)
+                    }
+                    _ => RespValue::SimpleError(String::from(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value",
+                    )),
+                };
+
+                resp_tx
+                    .send(CommandResponse::NonBlocking(response))
+                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+            }
         }
         Ok(())
     }

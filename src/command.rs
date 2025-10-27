@@ -54,6 +54,9 @@ pub enum Command {
         keys_and_ids: Vec<(String, String)>,
         timeout: Option<u64>,
     },
+    Incr {
+        key: String,
+    },
 }
 
 #[derive(Debug)]
@@ -463,6 +466,21 @@ impl TryFrom<RespValue> for Command {
                                 keys_and_ids: pairs,
                                 timeout,
                             })
+                        }
+                        "INCR" => {
+                            if data.len() != 2 {
+                                println!("invalid command {:?}", resp_value);
+                                return Err(ParseCommandError::WrongNumberArguments);
+                            }
+                            match &data[1] {
+                                RespValue::BulkString(key) => Ok(Command::Incr {
+                                    key: key.to_string(),
+                                }),
+                                _ => {
+                                    println!("invalid command {:?}", resp_value);
+                                    Err(ParseCommandError::InvalidArgument)
+                                }
+                            }
                         }
                         _ => {
                             println!("unknown command {:?}", resp_value);
