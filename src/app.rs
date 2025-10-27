@@ -501,6 +501,11 @@ impl App {
                 }
                 CommandResponse::NonBlocking(RespValue::Array(responses))
             }
+            Command::Discard => {
+                println!("got Discard in process_command");
+                let response = RespValue::SimpleError(String::from("ERR DISCARD without MULTI"));
+                CommandResponse::NonBlocking(response)
+            }
         })
     }
 
@@ -639,6 +644,16 @@ async fn accept_listeners(
 
                 if let Some(value) = value? {
                     match (&mut transaction_queue, Command::try_from(value)) {
+                        (Some(_), Ok(Command::Discard)) => {
+                            transaction_queue = None;
+                            let response = RespValue::SimpleString(String::from("OK"));
+                            connection.write_value(&response).await?;
+                        }
+                        (None, Ok(Command::Discard)) => {
+                            let response =
+                                RespValue::SimpleError(String::from("ERR DISCARD without MULTI"));
+                            connection.write_value(&response).await?;
+                        }
                         (Some(queue), Ok(Command::Exec)) => {
                             let command = Command::Transaction {
                                 commands: std::mem::take(queue),

@@ -1955,3 +1955,46 @@ async fn transaction_works() {
         "MULTI calls can not be nested"
     );
 }
+
+#[tokio::test]
+async fn transaction_can_be_discarded() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let data: String = redis::cmd("SET")
+        .arg("foo")
+        .arg("bar")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "OK");
+
+    let data: String = redis::cmd("MULTI").query_async(&mut conn).await.unwrap();
+    assert_eq!(data, "OK");
+
+    let data: String = redis::cmd("SET")
+        .arg("foo")
+        .arg(5)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "QUEUED");
+
+    let data: String = redis::cmd("DISCARD").query_async(&mut conn).await.unwrap();
+    assert_eq!(data, "OK");
+
+    let err: Result<String, redis::RedisError> = redis::cmd("EXEC").query_async(&mut conn).await;
+    assert_eq!(err.unwrap_err().detail().unwrap(), "EXEC without MULTI");
+
+    let err: Result<String, redis::RedisError> = redis::cmd("DISCARD").query_async(&mut conn).await;
+    assert_eq!(err.unwrap_err().detail().unwrap(), "DISCARD without MULTI");
+
+    let data: String = redis::cmd("GET")
+        .arg("foo")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "bar");
+}

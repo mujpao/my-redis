@@ -62,6 +62,7 @@ pub enum Command {
     Transaction {
         commands: Vec<Command>,
     },
+    Discard,
 }
 
 #[derive(Debug)]
@@ -489,6 +490,7 @@ impl TryFrom<RespValue> for Command {
                         }
                         "MULTI" => Ok(Command::Multi),
                         "EXEC" => Ok(Command::Exec),
+                        "DISCARD" => Ok(Command::Discard),
                         _ => {
                             println!("unknown command {:?}", resp_value);
                             Err(ParseCommandError::UnknownCommand)
