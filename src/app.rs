@@ -66,6 +66,8 @@ pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
 
 enum AppEvent {
     KeyExpired { key: String },
+    ElementPushedToList { key: String },
+    EntryAddedToStream { key: String },
 }
 
 struct App {
@@ -118,6 +120,12 @@ impl App {
                     }
                 }
             }
+            AppEvent::ElementPushedToList { key } => {
+                self.notify_blpop_listeners(&key)?;
+            }
+            AppEvent::EntryAddedToStream { key } => {
+                self.notify_xread_listeners(&key).await?;
+            }
         }
         Ok(())
     }
@@ -127,19 +135,22 @@ impl App {
         command: Command,
         resp_tx: oneshot::Sender<CommandResponse>,
     ) -> anyhow::Result<()> {
+        let response = self.execute_command(command).await?;
+        resp_tx
+            .send(response)
+            .map_err(|e| anyhow!("failed to send command response {:?}", e))
+    }
+
+    async fn execute_command(&mut self, command: Command) -> anyhow::Result<CommandResponse> {
         println!("received command: {:?}", command);
-        match command {
+        Ok(match command {
             Command::Ping => {
                 let response = RespValue::SimpleString(String::from("PONG"));
-                resp_tx
-                    .send(CommandResponse::NonBlocking(response))
-                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+                CommandResponse::NonBlocking(response)
             }
             Command::Echo(s) => {
                 let response = RespValue::BulkString(s);
-                resp_tx
-                    .send(CommandResponse::NonBlocking(response))
-                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+                CommandResponse::NonBlocking(response)
             }
             Command::Set {
                 key,
@@ -168,9 +179,7 @@ impl App {
                 }
 
                 let response = RespValue::SimpleString(String::from("OK"));
-                resp_tx
-                    .send(CommandResponse::NonBlocking(response))
-                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+                CommandResponse::NonBlocking(response)
             }
             Command::Get { key } => {
                 let response = match self.map.get(&key) {
@@ -179,9 +188,7 @@ impl App {
                     _ => RespValue::SimpleError(String::from("Wrong type")),
                 };
 
-                resp_tx
-                    .send(CommandResponse::NonBlocking(response))
-                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+                CommandResponse::NonBlocking(response)
             }
             Command::RPush { key, elements } => {
                 let response = match self.map.get_mut(&key) {
@@ -200,11 +207,11 @@ impl App {
                     _ => RespValue::SimpleError(String::from("Wrong type")),
                 };
 
-                resp_tx
-                    .send(CommandResponse::NonBlocking(response))
-                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+                self.events_tx
+                    .send(AppEvent::ElementPushedToList { key })
+                    .await?;
 
-                self.notify_blpop_listeners(&key)?;
+                CommandResponse::NonBlocking(response)
             }
             Command::LPush { key, elements } => {
                 let response = match self.map.get_mut(&key) {
@@ -230,11 +237,10 @@ impl App {
                     _ => RespValue::SimpleError(String::from("Wrong type")),
                 };
 
-                resp_tx
-                    .send(CommandResponse::NonBlocking(response))
-                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
-
-                self.notify_blpop_listeners(&key)?;
+                self.events_tx
+                    .send(AppEvent::ElementPushedToList { key })
+                    .await?;
+                CommandResponse::NonBlocking(response)
             }
             Command::LRange { key, start, stop } => {
                 let value = match self.map.get(&key) {
@@ -261,9 +267,7 @@ impl App {
                     _ => Vec::<RespValue>::new(),
                 };
 
-                resp_tx
-                    .send(CommandResponse::NonBlocking(RespValue::Array(value)))
-                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+                CommandResponse::NonBlocking(RespValue::Array(value))
             }
             Command::LLen { key } => {
                 let response = match self.map.get(&key) {
@@ -272,16 +276,12 @@ impl App {
                     _ => RespValue::SimpleError(String::from("Wrong type")),
                 };
 
-                resp_tx
-                    .send(CommandResponse::NonBlocking(response))
-                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+                CommandResponse::NonBlocking(response)
             }
             Command::LPop { key, count } => {
                 let response = lpop(&key, count, &mut self.map);
 
-                resp_tx
-                    .send(CommandResponse::NonBlocking(response))
-                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+                CommandResponse::NonBlocking(response)
             }
             Command::BLPop { key, timeout } => {
                 let elem = self
@@ -293,7 +293,7 @@ impl App {
                     })
                     .flatten();
 
-                let response = match elem {
+                match elem {
                     Some(elem) => CommandResponse::NonBlocking(RespValue::Array(vec![
                         RespValue::BulkString(key.clone()),
                         elem,
@@ -311,11 +311,7 @@ impl App {
                         list.push(BLPopListener { tx, expires_at });
                         CommandResponse::BlockingOneshot((rx, duration))
                     }
-                };
-
-                resp_tx
-                    .send(response)
-                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+                }
             }
             Command::Type { key } => {
                 let response = match self.map.get(&key) {
@@ -325,9 +321,7 @@ impl App {
                     None => RespValue::SimpleString("none".to_string()),
                 };
 
-                resp_tx
-                    .send(CommandResponse::NonBlocking(response))
-                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+                CommandResponse::NonBlocking(response)
             }
             Command::XAdd { key, id, pairs } => {
                 let response = match StreamIdInput::from_str(&id) {
@@ -364,11 +358,11 @@ impl App {
                     }
                 };
 
-                resp_tx
-                    .send(CommandResponse::NonBlocking(response))
-                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+                self.events_tx
+                    .send(AppEvent::EntryAddedToStream { key })
+                    .await?;
 
-                self.notify_xread_listeners(&key).await?;
+                CommandResponse::NonBlocking(response)
             }
             Command::XRange { key, start, end } => {
                 let response = {
@@ -382,9 +376,7 @@ impl App {
                     }
                 };
 
-                resp_tx
-                    .send(CommandResponse::NonBlocking(response))
-                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+                CommandResponse::NonBlocking(response)
             }
             Command::XRead {
                 keys_and_ids,
@@ -454,9 +446,7 @@ impl App {
                     }
                 };
 
-                resp_tx
-                    .send(response)
-                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+                response
             }
             Command::Incr { key } => {
                 let response = match self.map.get_mut(&key) {
@@ -483,18 +473,35 @@ impl App {
                     )),
                 };
 
-                resp_tx
-                    .send(CommandResponse::NonBlocking(response))
-                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+                CommandResponse::NonBlocking(response)
             }
             Command::Multi => {
+                println!("got multi in process_command");
                 let response = RespValue::SimpleString(String::from("OK"));
-                resp_tx
-                    .send(CommandResponse::NonBlocking(response))
-                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+                CommandResponse::NonBlocking(response)
             }
-        }
-        Ok(())
+            Command::Exec => {
+                println!("got exec in process_command");
+                let response = RespValue::SimpleError(String::from("ERR EXEC without MULTI"));
+                CommandResponse::NonBlocking(response)
+            }
+            Command::Transaction { commands } => {
+                let mut responses = vec![];
+                for command in commands {
+                    let response = match Box::pin(self.execute_command(command)).await {
+                        Ok(CommandResponse::NonBlocking(response)) => response,
+                        Ok(_) => RespValue::NullBulkString,
+                        Err(e) => {
+                            println!("error during transaction: {:?}", e);
+                            RespValue::SimpleError(String::from("Unable to execute command"))
+                        }
+                    };
+
+                    responses.push(response);
+                }
+                CommandResponse::NonBlocking(RespValue::Array(responses))
+            }
+        })
     }
 
     fn add_xread_listeners(
@@ -626,12 +633,49 @@ async fn accept_listeners(
 
         let _: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             let mut connection = Connection::new(stream);
+            let mut transaction_queue: Option<Vec<Command>> = None;
             loop {
                 let value = connection.read_value().await;
 
                 if let Some(value) = value? {
-                    match Command::try_from(value) {
-                        Ok(command) => {
+                    match (&mut transaction_queue, Command::try_from(value)) {
+                        (Some(queue), Ok(Command::Exec)) => {
+                            let command = Command::Transaction {
+                                commands: std::mem::take(queue),
+                            };
+                            transaction_queue = None;
+                            let (resp_tx, resp_rx) = oneshot::channel();
+                            tx.send((command, resp_tx)).await?;
+
+                            let response = resp_rx.await?;
+                            let response = match response {
+                                CommandResponse::NonBlocking(response) => response,
+                                _ => RespValue::SimpleError(String::from("transaction failed")),
+                            };
+                            connection.write_value(&response).await?;
+                        }
+                        (None, Ok(Command::Exec)) => {
+                            let response =
+                                RespValue::SimpleError(String::from("ERR EXEC without MULTI"));
+                            connection.write_value(&response).await?;
+                        }
+                        (Some(_), Ok(Command::Multi)) => {
+                            let response = RespValue::SimpleError(String::from(
+                                "ERR MULTI calls can not be nested",
+                            ));
+                            connection.write_value(&response).await?;
+                        }
+                        (Some(queue), Ok(command)) => {
+                            queue.push(command);
+                            let response = RespValue::SimpleString(String::from("QUEUED"));
+                            connection.write_value(&response).await?;
+                        }
+                        (None, Ok(Command::Multi)) => {
+                            transaction_queue = Some(Vec::new());
+                            let response = RespValue::SimpleString(String::from("OK"));
+                            connection.write_value(&response).await?;
+                        }
+                        (None, Ok(command)) => {
                             let (resp_tx, resp_rx) = oneshot::channel();
                             tx.send((command, resp_tx)).await?;
 
@@ -676,7 +720,7 @@ async fn accept_listeners(
 
                             connection.write_value(&to_send).await?;
                         }
-                        Err(e) => {
+                        (_, Err(e)) => {
                             let s = format!("{}", e);
                             let to_send = RespValue::SimpleError(s);
                             connection.write_value(&to_send).await?;

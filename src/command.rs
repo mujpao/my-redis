@@ -58,6 +58,10 @@ pub enum Command {
         key: String,
     },
     Multi,
+    Exec,
+    Transaction {
+        commands: Vec<Command>,
+    },
 }
 
 #[derive(Debug)]
@@ -484,6 +488,7 @@ impl TryFrom<RespValue> for Command {
                             }
                         }
                         "MULTI" => Ok(Command::Multi),
+                        "EXEC" => Ok(Command::Exec),
                         _ => {
                             println!("unknown command {:?}", resp_value);
                             Err(ParseCommandError::UnknownCommand)

@@ -1880,12 +1880,78 @@ async fn incr_works() {
 }
 
 #[tokio::test]
-async fn multi_returns_ok() {
+async fn transaction_works() {
     let port = setup().await;
 
     let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
     let mut conn = client.get_multiplexed_async_connection().await.unwrap();
 
+    let client2 = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn2 = client2.get_multiplexed_async_connection().await.unwrap();
+
+    let err: Result<String, redis::RedisError> = redis::cmd("EXEC").query_async(&mut conn).await;
+    assert_eq!(err.unwrap_err().detail().unwrap(), "EXEC without MULTI");
+
+    let data: String = redis::cmd("SET")
+        .arg("foo")
+        .arg("bar")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "OK");
+
     let data: String = redis::cmd("MULTI").query_async(&mut conn).await.unwrap();
     assert_eq!(data, "OK");
+
+    let mut expected = vec![];
+
+    let data: String = redis::cmd("SET")
+        .arg("foo")
+        .arg(5)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "QUEUED");
+    expected.push(redis::Value::Okay);
+
+    let data: String = redis::cmd("INCR")
+        .arg("foo")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "QUEUED");
+    expected.push(redis::Value::Int(6));
+
+    let data: String = redis::cmd("GET")
+        .arg("foo")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "QUEUED");
+    expected.push(redis::Value::BulkString("6".into()));
+
+    let data: String = redis::cmd("GET")
+        .arg("foo")
+        .query_async(&mut conn2)
+        .await
+        .unwrap();
+    assert_eq!(data, "bar");
+
+    let data: redis::Value = redis::cmd("EXEC").query_async(&mut conn).await.unwrap();
+    assert_eq!(data, redis::Value::Array(expected));
+
+    let data: redis::Value = redis::cmd("GET")
+        .arg("foo")
+        .query_async(&mut conn2)
+        .await
+        .unwrap();
+    assert_eq!(data, redis::Value::BulkString("6".into()));
+
+    let data: String = redis::cmd("MULTI").query_async(&mut conn).await.unwrap();
+    assert_eq!(data, "OK");
+    let err: Result<String, redis::RedisError> = redis::cmd("MULTI").query_async(&mut conn).await;
+    assert_eq!(
+        err.unwrap_err().detail().unwrap(),
+        "MULTI calls can not be nested"
+    );
 }
