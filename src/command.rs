@@ -57,6 +57,7 @@ pub enum Command {
     Incr {
         key: String,
     },
+    Multi,
 }
 
 #[derive(Debug)]
@@ -482,6 +483,7 @@ impl TryFrom<RespValue> for Command {
                                 }
                             }
                         }
+                        "MULTI" => Ok(Command::Multi),
                         _ => {
                             println!("unknown command {:?}", resp_value);
                             Err(ParseCommandError::UnknownCommand)

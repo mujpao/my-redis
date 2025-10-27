@@ -487,6 +487,12 @@ impl App {
                     .send(CommandResponse::NonBlocking(response))
                     .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
             }
+            Command::Multi => {
+                let response = RespValue::SimpleString(String::from("OK"));
+                resp_tx
+                    .send(CommandResponse::NonBlocking(response))
+                    .map_err(|e| anyhow!("failed to send command response {:?}", e))?;
+            }
         }
         Ok(())
     }

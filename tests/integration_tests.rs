@@ -1878,3 +1878,14 @@ async fn incr_works() {
         .unwrap();
     assert_eq!(data, 1);
 }
+
+#[tokio::test]
+async fn multi_returns_ok() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let data: String = redis::cmd("MULTI").query_async(&mut conn).await.unwrap();
+    assert_eq!(data, "OK");
+}
