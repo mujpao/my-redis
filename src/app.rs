@@ -462,8 +462,9 @@ impl App {
                 let response = match self.map.get_mut(&key) {
                     Some(RedisDataType::String(b)) => match b.0.parse::<i64>() {
                         Ok(int_value) => {
-                            b.0 = (int_value + 1).to_string();
-                            RespValue::BulkString(b.0.clone())
+                            let new_value = int_value + 1;
+                            b.0 = (new_value).to_string();
+                            RespValue::Integer(new_value)
                         }
                         Err(_) => RespValue::SimpleError(String::from(
                             "ERR value is not an integer or out of range",
@@ -475,7 +476,7 @@ impl App {
                             key.to_string(),
                             RedisDataType::String(Box::new((new_value.clone(), None))),
                         );
-                        RespValue::BulkString(new_value)
+                        RespValue::Integer(1)
                     }
                     _ => RespValue::SimpleError(String::from(
                         "WRONGTYPE Operation against a key holding the wrong kind of value",
