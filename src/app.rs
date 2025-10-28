@@ -11,6 +11,7 @@ use tokio::select;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
+use tracing::{Instrument, info, info_span, instrument, warn};
 
 type Map = HashMap<String, RedisDataType>;
 
@@ -141,8 +142,9 @@ impl App {
             .map_err(|e| anyhow!("failed to send command response {:?}", e))
     }
 
+    #[instrument(skip(self))]
     async fn execute_command(&mut self, command: Command) -> anyhow::Result<CommandResponse> {
-        println!("received command: {:?}", command);
+        info!("received command");
         Ok(match command {
             Command::Ping => {
                 let response = RespValue::SimpleString(String::from("PONG"));
@@ -353,7 +355,7 @@ impl App {
                         }
                     }
                     Err(e) => {
-                        println!("{:?}", e);
+                        info!(reason = ?e, "invalid stream id");
                         RespValue::SimpleError(String::from("unable to parse stream id"))
                     }
                 };
@@ -476,12 +478,12 @@ impl App {
                 CommandResponse::NonBlocking(response)
             }
             Command::Multi => {
-                println!("got multi in process_command");
+                warn!("got multi in process_command");
                 let response = RespValue::SimpleString(String::from("OK"));
                 CommandResponse::NonBlocking(response)
             }
             Command::Exec => {
-                println!("got exec in process_command");
+                warn!("got exec in process_command");
                 let response = RespValue::SimpleError(String::from("ERR EXEC without MULTI"));
                 CommandResponse::NonBlocking(response)
             }
@@ -492,7 +494,7 @@ impl App {
                         Ok(CommandResponse::NonBlocking(response)) => response,
                         Ok(_) => RespValue::NullBulkString,
                         Err(e) => {
-                            println!("error during transaction: {:?}", e);
+                            warn!(reason= ?e, "error during transaction");
                             RespValue::SimpleError(String::from("Unable to execute command"))
                         }
                     };
@@ -502,7 +504,7 @@ impl App {
                 CommandResponse::NonBlocking(RespValue::Array(responses))
             }
             Command::Discard => {
-                println!("got Discard in process_command");
+                warn!("got Discard in process_command");
                 let response = RespValue::SimpleError(String::from("ERR DISCARD without MULTI"));
                 CommandResponse::NonBlocking(response)
             }
@@ -532,6 +534,7 @@ impl App {
         Ok(())
     }
 
+    #[instrument(skip(self))]
     async fn notify_xread_listeners(&mut self, key: &String) -> anyhow::Result<()> {
         match self.xread_listeners.remove(key) {
             Some(mut listeners) => {
@@ -543,13 +546,13 @@ impl App {
                         .ok_or_else(|| anyhow!("listeners is empty"))?;
 
                     if listener.tx.is_closed() {
-                        println!("xread channel has closed");
+                        info!("xread channel has closed");
                         continue;
                     }
 
                     if let Some(expires_at) = listener.expires_at {
                         if expires_at < Instant::now() {
-                            println!("xread listener has expired");
+                            info!("xread listener has expired");
                             let to_send = RespValue::NullArray;
                             let _ = listener.tx.send(to_send).await;
                             continue;
@@ -571,7 +574,7 @@ impl App {
                                 }
                             }
                             Err(e) => {
-                                println!("error getting stream: {:?}", e);
+                                info!(reason=?e,"error getting stream");
                             }
                         }
                     }
@@ -586,6 +589,7 @@ impl App {
         Ok(())
     }
 
+    #[instrument(skip(self))]
     fn notify_blpop_listeners(&mut self, key: &String) -> anyhow::Result<()> {
         match self.blpop_listeners.remove(key) {
             Some(mut listeners) => {
@@ -594,7 +598,7 @@ impl App {
                     .filter_map(|listener| {
                         if let Some(expires_at) = listener.expires_at {
                             if expires_at < Instant::now() {
-                                println!("blpop listener has expired");
+                                info!("blpop listener has expired");
                                 let to_send = RespValue::NullArray;
                                 let _ = listener.tx.send(to_send);
                                 return None;
@@ -633,11 +637,11 @@ async fn accept_listeners(
 ) -> anyhow::Result<()> {
     loop {
         let tx = tx.clone();
-        let (stream, _) = listener.accept().await?;
-        println!("accepted new connection");
+        let (stream, socket) = listener.accept().await?;
 
         let _: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-            let mut connection = Connection::new(stream);
+        info!("accepted new connection");
+        let mut connection = Connection::new(stream);
             let mut transaction_queue: Option<Vec<Command>> = None;
             loop {
                 let value = connection.read_value().await;
@@ -645,16 +649,20 @@ async fn accept_listeners(
                 if let Some(value) = value? {
                     match (&mut transaction_queue, Command::try_from(value)) {
                         (Some(_), Ok(Command::Discard)) => {
+                            info!("discarding transaction");
                             transaction_queue = None;
                             let response = RespValue::SimpleString(String::from("OK"));
                             connection.write_value(&response).await?;
                         }
                         (None, Ok(Command::Discard)) => {
+                            info!("ERR DISCARD without MULTI");
+
                             let response =
                                 RespValue::SimpleError(String::from("ERR DISCARD without MULTI"));
                             connection.write_value(&response).await?;
                         }
                         (Some(queue), Ok(Command::Exec)) => {
+                            info!(commands = ?queue, "executing transaction");
                             let command = Command::Transaction {
                                 commands: std::mem::take(queue),
                             };
@@ -670,22 +678,26 @@ async fn accept_listeners(
                             connection.write_value(&response).await?;
                         }
                         (None, Ok(Command::Exec)) => {
+                            info!("ERR EXEC without MULTI");
                             let response =
                                 RespValue::SimpleError(String::from("ERR EXEC without MULTI"));
                             connection.write_value(&response).await?;
                         }
                         (Some(_), Ok(Command::Multi)) => {
+                            info!("ERR MULTI calls can not be nested");
                             let response = RespValue::SimpleError(String::from(
                                 "ERR MULTI calls can not be nested",
                             ));
                             connection.write_value(&response).await?;
                         }
                         (Some(queue), Ok(command)) => {
+                            info!(?command, "adding command to transaction");
                             queue.push(command);
                             let response = RespValue::SimpleString(String::from("QUEUED"));
                             connection.write_value(&response).await?;
                         }
                         (None, Ok(Command::Multi)) => {
+                            info!("starting transaction");
                             transaction_queue = Some(Vec::new());
                             let response = RespValue::SimpleString(String::from("OK"));
                             connection.write_value(&response).await?;
@@ -710,12 +722,12 @@ async fn accept_listeners(
                                 {
                                     Some(duration) => match timeout(duration, rx.recv()).await {
                                         Ok(Some(value)) => {
-                                            println!("got {:?} from mpsc channel", value);
+                                            info!("got {:?} from mpsc channel", value);
                                             rx.close();
                                             value
                                         }
                                         e => {
-                                            println!(
+                                            info!(
                                                 "timeout reached for blocking mpsc receive, {:?}",
                                                 e
                                             );
@@ -743,7 +755,7 @@ async fn accept_listeners(
                     }
                 }
             }
-        });
+        }.instrument(info_span!("client connection", addr = ?socket)));
     }
 }
 

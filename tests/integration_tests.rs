@@ -3,8 +3,17 @@ use codecrafters_redis::app::run;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::time::sleep;
+use tracing_subscriber::{filter::EnvFilter, filter::LevelFilter, fmt, layer::SubscriberExt};
 
 async fn setup() -> u16 {
+    let subscriber = tracing_subscriber::registry().with(fmt::layer()).with(
+        EnvFilter::builder()
+            .with_default_directive(LevelFilter::INFO.into())
+            .from_env_lossy(),
+    );
+
+    let _ = tracing::subscriber::set_global_default(subscriber);
+
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 

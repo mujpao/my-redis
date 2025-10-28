@@ -3,6 +3,7 @@ use anyhow::anyhow;
 use radix_trie::{Trie, TrieCommon, TrieKey};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::{info, instrument};
 
 pub struct Stream {
     data: Trie<StreamId, Vec<StreamData>>,
@@ -79,10 +80,11 @@ impl Stream {
         Ok(id)
     }
 
+    #[instrument(skip(self))]
     pub fn get_after_id(&self, last_id: Option<&str>) -> Result<Vec<RespValue>, StreamError> {
         let last_id = match last_id {
             Some(id) => Some(StreamId::from_range(id, false).map_err(|e| {
-                println!("{:?}", e);
+                info!(reason= ?e, "invalid range for stream id");
                 StreamError::InvalidRange
             })?),
             None => None,
@@ -125,7 +127,7 @@ impl Stream {
         let common_prefix = if common_idx > 0 {
             Some(
                 StreamId::from_range(&start[0..common_idx], false).map_err(|e| {
-                    println!("{:?}", e);
+                    info!(reason= ?e, "invalid range for stream id");
                     StreamError::InvalidRange
                 })?,
             )
@@ -139,7 +141,7 @@ impl Stream {
                 sequence_number: 0,
             },
             start => StreamId::from_range(start, false).map_err(|e| {
-                println!("{:?}", e);
+                info!(reason= ?e, "invalid range for stream id");
                 StreamError::InvalidRange
             })?,
         };
@@ -150,7 +152,7 @@ impl Stream {
                 sequence_number: usize::MAX,
             },
             end => StreamId::from_range(end, true).map_err(|e| {
-                println!("{:?}", e);
+                info!(reason= ?e, "invalid range for stream id");
                 StreamError::InvalidRange
             })?,
         };
