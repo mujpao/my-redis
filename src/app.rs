@@ -41,7 +41,9 @@ enum CommandResponse {
     BlockingMpsc((mpsc::Receiver<RespValue>, Option<Duration>)),
 }
 
+#[instrument]
 pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
+    info!("starting up redis instance");
     let map = HashMap::new();
     let blpop_listeners = HashMap::new();
     let xread_listeners = HashMap::new();
