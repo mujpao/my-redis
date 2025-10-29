@@ -80,6 +80,7 @@ struct App {
     events_rx: mpsc::Receiver<AppEvent>,
     role: Role,
     addr: SocketAddr,
+    replication_id: Option<String>,
 }
 
 impl App {
@@ -93,6 +94,12 @@ impl App {
         let xread_listeners = HashMap::new();
         let (events_tx, events_rx) = mpsc::channel(100);
 
+        let replication_id = if let Role::Primary = role {
+            Some(Alphanumeric.sample_string(&mut rand::rng(), 40))
+        } else {
+            None
+        };
+
         Self {
             map,
             blpop_listeners,
@@ -102,6 +109,7 @@ impl App {
             events_rx,
             role,
             addr,
+            replication_id,
         }
     }
 
@@ -628,15 +636,21 @@ impl App {
                 for category in categories {
                     match category.as_str().to_lowercase().as_str() {
                         "replication" => {
-                            let data = match self.role {
-                                Role::Primary => {
-                                    let repl_id = Alphanumeric.sample_string(&mut rand::rng(), 40);
+                            let data = match (&self.role, &self.replication_id) {
+                                (Role::Primary, Some(replication_id)) => {
                                     format!(
                                         "role:master\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
-                                        repl_id, 0
+                                        replication_id, 0
                                     )
                                 }
-                                Role::ReplicaOf(_) => "role:slave".to_string(),
+                                (Role::Primary, None) => {
+                                    warn!("primary instance doesn't have a replication id");
+                                    format!(
+                                        "role:master\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
+                                        "NULL", 0
+                                    )
+                                }
+                                (Role::ReplicaOf(_), _) => "role:slave".to_string(),
                             };
                             info.push_str(&data);
                         }
@@ -653,7 +667,12 @@ impl App {
                 CommandResponse::NonBlocking(response)
             }
             Command::PSync => {
-                let response = RespValue::SimpleString(String::from("FULLRESYNC <REPL_ID> 0"));
+                let id = match &self.replication_id {
+                    Some(id) => id,
+                    None => "NULL",
+                };
+                let data = format!("FULLRESYNC {} 0", id);
+                let response = RespValue::SimpleString(data);
                 CommandResponse::NonBlocking(response)
             }
         })
