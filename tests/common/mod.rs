@@ -24,6 +24,7 @@ pub async fn setup() -> u16 {
     port
 }
 
+#[allow(dead_code)]
 pub async fn setup_replica(primary_port: u16) -> MultiplexedConnection {
     setup_tracing();
 

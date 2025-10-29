@@ -18,12 +18,16 @@ fn validate_primary_address(s: &str) -> Result<SocketAddr, String> {
     if s.len() != 2 {
         return Err(format!("Unable to parse ip address of primary"));
     }
-    let ip_addr: Ipv4Addr = s[0]
-        .parse()
-        .map_err(|_| format!("`{}` isn't a ip address", s[0]))?;
+    let ip_addr: Ipv4Addr = match s[0] {
+        "localhost" => Ipv4Addr::LOCALHOST,
+        addr => addr
+            .parse()
+            .map_err(|_| format!("Unable to parse ip address`{}`", s[0]))?,
+    };
+
     let port: u16 = s[1]
         .parse()
-        .map_err(|_| format!("`{}` isn't a port number", s[1]))?;
+        .map_err(|_| format!("Unable to parse port`{}`", s[1]))?;
 
     Ok(SocketAddr::new(IpAddr::V4(ip_addr), port))
 }
