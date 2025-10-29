@@ -192,6 +192,23 @@ impl App {
                     info!(?primary, "got OK from primary");
                 }
 
+                let result = App::send_command(
+                    RespValue::Array(vec![
+                        RespValue::BulkString(String::from("PSYNC")),
+                        RespValue::BulkString(String::from("?")),
+                        RespValue::BulkString(String::from("-1")),
+                    ]),
+                    &mut conn,
+                )
+                .await?;
+
+                if let RespValue::SimpleString(_) = result {
+                    info!(?primary, ?result, "got response to psync");
+                } else {
+                    warn!(?primary, ?result, "unable to handshake with primary");
+                    return Err(anyhow!("unable to handshake with primary redis instance"));
+                }
+
                 Ok(())
             }
         }
@@ -633,6 +650,10 @@ impl App {
             }
             Command::ReplConf => {
                 let response = RespValue::SimpleString(String::from("OK"));
+                CommandResponse::NonBlocking(response)
+            }
+            Command::PSync => {
+                let response = RespValue::SimpleString(String::from("FULLRESYNC <REPL_ID> 0"));
                 CommandResponse::NonBlocking(response)
             }
         })

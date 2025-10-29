@@ -68,6 +68,7 @@ pub enum Command {
         categories: Vec<String>,
     },
     ReplConf,
+    PSync,
 }
 
 #[derive(Debug)]
@@ -556,6 +557,7 @@ impl TryFrom<RespValue> for Command {
                             Ok(Command::Info { categories })
                         }
                         "REPLCONF" => Ok(Command::ReplConf),
+                        "PSYNC" => Ok(Command::PSync),
                         _ => {
                             let e = ParseCommandError::UnknownCommand;
                             info!(reason = %e, ?resp_value, "unknown command");
