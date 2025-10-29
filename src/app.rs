@@ -53,8 +53,10 @@ enum CommandResponse {
 pub async fn run(listener: TcpListener, role: Role) -> anyhow::Result<()> {
     info!("starting up redis instance");
 
+    let addr = listener.local_addr()?;
+
     let (command_tx, command_rx) = mpsc::channel(100);
-    let mut app = App::new(command_rx, role);
+    let mut app = App::new(addr, command_rx, role);
 
     tokio::spawn(async move {
         accept_listeners(listener, command_tx).await.unwrap();
@@ -77,10 +79,12 @@ struct App {
     events_tx: mpsc::Sender<AppEvent>,
     events_rx: mpsc::Receiver<AppEvent>,
     role: Role,
+    addr: SocketAddr,
 }
 
 impl App {
     fn new(
+        addr: SocketAddr,
         command_rx: mpsc::Receiver<(Command, oneshot::Sender<CommandResponse>)>,
         role: Role,
     ) -> Self {
@@ -97,6 +101,7 @@ impl App {
             events_tx,
             events_rx,
             role,
+            addr,
         }
     }
 
@@ -138,14 +143,53 @@ impl App {
             Role::ReplicaOf(primary) => {
                 let stream = TcpStream::connect(primary).await?;
                 let mut conn = Connection::new(stream);
-                App::send_ping(&mut conn).await?;
-                let result = conn.read_value().await?;
+                let result = App::send_command(
+                    RespValue::Array(vec![RespValue::BulkString(String::from("PING"))]),
+                    &mut conn,
+                )
+                .await?;
 
-                if result != Some(RespValue::SimpleString(String::from("PONG"))) {
+                if result != RespValue::SimpleString(String::from("PONG")) {
                     warn!(?primary, ?result, "unable to handshake with primary");
                     return Err(anyhow!("unable to handshake with primary redis instance"));
                 } else {
                     info!(?primary, "got pong from primary");
+                }
+
+                let port = self.addr.port().to_string();
+
+                let result = App::send_command(
+                    RespValue::Array(vec![
+                        RespValue::BulkString(String::from("REPLCONF")),
+                        RespValue::BulkString(String::from("listening-port")),
+                        RespValue::BulkString(String::from(port)),
+                    ]),
+                    &mut conn,
+                )
+                .await?;
+
+                if result != RespValue::SimpleString(String::from("OK")) {
+                    warn!(?primary, ?result, "unable to handshake with primary");
+                    return Err(anyhow!("unable to handshake with primary redis instance"));
+                } else {
+                    info!(?primary, "got OK from primary");
+                }
+
+                let result = App::send_command(
+                    RespValue::Array(vec![
+                        RespValue::BulkString(String::from("REPLCONF")),
+                        RespValue::BulkString(String::from("capa")),
+                        RespValue::BulkString(String::from("psync2")),
+                    ]),
+                    &mut conn,
+                )
+                .await?;
+
+                if result != RespValue::SimpleString(String::from("OK")) {
+                    warn!(?primary, ?result, "unable to handshake with primary");
+                    return Err(anyhow!("unable to handshake with primary redis instance"));
+                } else {
+                    info!(?primary, "got OK from primary");
                 }
 
                 Ok(())
@@ -153,15 +197,15 @@ impl App {
         }
     }
 
-    async fn send_ping(conn: &mut Connection) -> anyhow::Result<()> {
-        conn.write_value(&RespValue::Array(vec![RespValue::BulkString(
-            String::from("PING"),
-        )]))
-        .await
-        .map_err(|e| {
-            warn!(reason = ?e, "Unable to send ping to primary");
-            anyhow!("unable to send ping")
-        })
+    async fn send_command(command: RespValue, conn: &mut Connection) -> anyhow::Result<RespValue> {
+        conn.write_value(&command).await.map_err(|e| {
+            warn!(?command, reason = ?e, "Unable to send command to primary");
+            anyhow!("unable to send command")
+        })?;
+
+        conn.read_value()
+            .await?
+            .ok_or_else(|| anyhow!("no value read from connection"))
     }
 
     async fn process_event(&mut self, event: AppEvent) -> anyhow::Result<()> {
@@ -587,6 +631,10 @@ impl App {
 
                 CommandResponse::NonBlocking(response)
             }
+            Command::ReplConf => {
+                let response = RespValue::SimpleString(String::from("OK"));
+                CommandResponse::NonBlocking(response)
+            }
         })
     }
 
@@ -725,7 +773,10 @@ async fn accept_listeners(
             loop {
                 let value = connection.read_value().await;
 
+
                 if let Some(value) = value? {
+                info!(?value, "got value on connection");
+
                     match (&mut transaction_queue, Command::try_from(value)) {
                         (Some(_), Ok(Command::Discard)) => {
                             info!("discarding transaction");
