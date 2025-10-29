@@ -8,7 +8,7 @@ use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -52,22 +52,9 @@ enum CommandResponse {
 #[instrument]
 pub async fn run(listener: TcpListener, role: Role) -> anyhow::Result<()> {
     info!("starting up redis instance");
-    let map = HashMap::new();
-    let blpop_listeners = HashMap::new();
-    let xread_listeners = HashMap::new();
 
     let (command_tx, command_rx) = mpsc::channel(100);
-    let (events_tx, events_rx) = mpsc::channel(100);
-
-    let mut app = App {
-        map,
-        blpop_listeners,
-        xread_listeners,
-        command_rx,
-        events_tx,
-        events_rx,
-        role,
-    };
+    let mut app = App::new(command_rx, role);
 
     tokio::spawn(async move {
         accept_listeners(listener, command_tx).await.unwrap();
@@ -93,7 +80,29 @@ struct App {
 }
 
 impl App {
+    fn new(
+        command_rx: mpsc::Receiver<(Command, oneshot::Sender<CommandResponse>)>,
+        role: Role,
+    ) -> Self {
+        let map = HashMap::new();
+        let blpop_listeners = HashMap::new();
+        let xread_listeners = HashMap::new();
+        let (events_tx, events_rx) = mpsc::channel(100);
+
+        Self {
+            map,
+            blpop_listeners,
+            xread_listeners,
+            command_rx,
+            events_tx,
+            events_rx,
+            role,
+        }
+    }
+
     async fn run(&mut self) -> anyhow::Result<()> {
+        self.perform_handshake().await?;
+
         loop {
             select![
                 maybe_command = self.command_rx.recv() => {
@@ -120,6 +129,39 @@ impl App {
                 }
             ];
         }
+    }
+
+    #[instrument(skip(self))]
+    async fn perform_handshake(&mut self) -> anyhow::Result<()> {
+        match self.role {
+            Role::Primary => Ok(()),
+            Role::ReplicaOf(primary) => {
+                let stream = TcpStream::connect(primary).await?;
+                let mut conn = Connection::new(stream);
+                App::send_ping(&mut conn).await?;
+                let result = conn.read_value().await?;
+
+                if result != Some(RespValue::SimpleString(String::from("PONG"))) {
+                    warn!(?primary, ?result, "unable to handshake with primary");
+                    return Err(anyhow!("unable to handshake with primary redis instance"));
+                } else {
+                    info!(?primary, "got pong from primary");
+                }
+
+                Ok(())
+            }
+        }
+    }
+
+    async fn send_ping(conn: &mut Connection) -> anyhow::Result<()> {
+        conn.write_value(&RespValue::Array(vec![RespValue::BulkString(
+            String::from("PING"),
+        )]))
+        .await
+        .map_err(|e| {
+            warn!(reason = ?e, "Unable to send ping to primary");
+            anyhow!("unable to send ping")
+        })
     }
 
     async fn process_event(&mut self, event: AppEvent) -> anyhow::Result<()> {
