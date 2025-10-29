@@ -9,6 +9,7 @@ anyhow = "1.0.100"                                   # error handling
 bytes = "1.10.1"                                     # helps manage buffers
 clap = { version = "4.5.50", features = ["derive"] }
 radix_trie = "0.3.0"
+rand = "0.9.2"
 thiserror = "1.0.32"                                # error handling
 tokio = { version = "1.47.1", features = ["full"] } # async networking
 tracing = "0.1.41"

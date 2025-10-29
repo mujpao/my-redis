@@ -14,7 +14,10 @@ async fn info_replication_works() {
         .query_async(&mut conn)
         .await
         .unwrap();
-    assert_eq!(data, "role:master");
+
+    assert!(data.contains("role:master\r\n"));
+    assert!(data.contains("master_replid:"));
+    assert!(data.contains("master_repl_offset:0"));
 
     let mut conn2 = setup_replica(port).await;
 

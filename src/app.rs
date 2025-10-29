@@ -3,6 +3,7 @@ use crate::connection::Connection;
 use crate::resp::RespValue;
 use crate::stream::{Stream, StreamData, StreamIdInput};
 use anyhow::anyhow;
+use rand::distr::{Alphanumeric, SampleString};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -524,11 +525,17 @@ impl App {
                 for category in categories {
                     match category.as_str().to_lowercase().as_str() {
                         "replication" => {
-                            let role = match self.role {
-                                Role::Primary => "role:master",
-                                Role::ReplicaOf(_) => "role:slave",
+                            let data = match self.role {
+                                Role::Primary => {
+                                    let repl_id = Alphanumeric.sample_string(&mut rand::rng(), 40);
+                                    format!(
+                                        "role:master\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
+                                        repl_id, 0
+                                    )
+                                }
+                                Role::ReplicaOf(_) => "role:slave".to_string(),
                             };
-                            info.push_str(role);
+                            info.push_str(&data);
                         }
                         _ => {}
                     }
