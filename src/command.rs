@@ -64,6 +64,9 @@ pub enum Command {
         commands: Vec<Command>,
     },
     Discard,
+    Info {
+        categories: Vec<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -535,6 +538,22 @@ impl TryFrom<RespValue> for Command {
                         "MULTI" => Ok(Command::Multi),
                         "EXEC" => Ok(Command::Exec),
                         "DISCARD" => Ok(Command::Discard),
+                        "INFO" => {
+                            let mut categories = Vec::new();
+                            for category in &data[1..] {
+                                match category {
+                                    RespValue::BulkString(category) => {
+                                        categories.push(category.clone());
+                                    }
+                                    _ => {
+                                        let e = ParseCommandError::InvalidArgument;
+                                        info!(reason = %e, ?resp_value, "invalid command");
+                                        return Err(e);
+                                    }
+                                }
+                            }
+                            Ok(Command::Info { categories })
+                        }
                         _ => {
                             let e = ParseCommandError::UnknownCommand;
                             info!(reason = %e, ?resp_value, "unknown command");

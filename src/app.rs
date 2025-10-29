@@ -510,6 +510,21 @@ impl App {
                 let response = RespValue::SimpleError(String::from("ERR DISCARD without MULTI"));
                 CommandResponse::NonBlocking(response)
             }
+            Command::Info { categories } => {
+                let mut info = String::new();
+                for category in categories {
+                    match category.as_str().to_lowercase().as_str() {
+                        "replication" => {
+                            info.push_str("role:master");
+                        }
+                        _ => {}
+                    }
+                }
+
+                let response = RespValue::BulkString(info);
+
+                CommandResponse::NonBlocking(response)
+            }
         })
     }
 
