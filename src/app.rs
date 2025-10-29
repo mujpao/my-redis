@@ -4,6 +4,7 @@ use crate::resp::RespValue;
 use crate::stream::{Stream, StreamData, StreamIdInput};
 use anyhow::anyhow;
 use std::collections::{HashMap, VecDeque};
+use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -19,6 +20,12 @@ enum RedisDataType {
     String(Box<(String, Option<Instant>)>),
     List(Box<VecDeque<RespValue>>),
     Stream(Box<Stream>),
+}
+
+#[derive(Debug)]
+pub enum Role {
+    Primary,
+    ReplicaOf(SocketAddr),
 }
 
 #[derive(Debug)]
@@ -42,7 +49,7 @@ enum CommandResponse {
 }
 
 #[instrument]
-pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
+pub async fn run(listener: TcpListener, role: Role) -> anyhow::Result<()> {
     info!("starting up redis instance");
     let map = HashMap::new();
     let blpop_listeners = HashMap::new();
@@ -58,6 +65,7 @@ pub async fn run(listener: TcpListener) -> anyhow::Result<()> {
         command_rx,
         events_tx,
         events_rx,
+        role,
     };
 
     tokio::spawn(async move {
@@ -80,6 +88,7 @@ struct App {
     command_rx: mpsc::Receiver<(Command, oneshot::Sender<CommandResponse>)>,
     events_tx: mpsc::Sender<AppEvent>,
     events_rx: mpsc::Receiver<AppEvent>,
+    role: Role,
 }
 
 impl App {
@@ -515,7 +524,11 @@ impl App {
                 for category in categories {
                     match category.as_str().to_lowercase().as_str() {
                         "replication" => {
-                            info.push_str("role:master");
+                            let role = match self.role {
+                                Role::Primary => "role:master",
+                                Role::ReplicaOf(_) => "role:slave",
+                            };
+                            info.push_str(role);
                         }
                         _ => {}
                     }

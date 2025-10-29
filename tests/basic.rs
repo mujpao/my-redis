@@ -1,26 +1,9 @@
+use crate::common::setup;
 use chrono::DateTime;
-use codecrafters_redis::app::run;
 use std::time::Duration;
-use tokio::net::TcpListener;
 use tokio::time::sleep;
-use tracing_subscriber::{filter::EnvFilter, filter::LevelFilter, fmt, layer::SubscriberExt};
 
-async fn setup() -> u16 {
-    let subscriber = tracing_subscriber::registry().with(fmt::layer()).with(
-        EnvFilter::builder()
-            .with_default_directive(LevelFilter::INFO.into())
-            .from_env_lossy(),
-    );
-
-    let _ = tracing::subscriber::set_global_default(subscriber);
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    let _ = tokio::spawn(async { run(listener).await });
-
-    port
-}
+mod common;
 
 #[tokio::test]
 async fn handle_pings_from_multiple_connections() {
@@ -2006,19 +1989,4 @@ async fn transaction_can_be_discarded() {
         .await
         .unwrap();
     assert_eq!(data, "bar");
-}
-
-#[tokio::test]
-async fn info_replication_works() {
-    let port = setup().await;
-
-    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
-    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
-
-    let data: String = redis::cmd("INFO")
-        .arg("replication")
-        .query_async(&mut conn)
-        .await
-        .unwrap();
-    assert_eq!(data, "role:master");
 }
