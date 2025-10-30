@@ -241,7 +241,7 @@ impl App {
                     return Err(anyhow!("unable to handshake with primary redis instance"));
                 }
 
-                conn.read_rdb_data().await.unwrap();
+                let _ = conn.read_rdb_data().await;
 
                 Ok(())
             }
