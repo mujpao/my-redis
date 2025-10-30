@@ -1,5 +1,6 @@
 pub mod app;
+mod client_connection;
 mod command;
-mod connection;
-mod resp;
+pub mod connection;
+pub mod resp;
 mod stream;

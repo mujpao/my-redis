@@ -1,3 +1,4 @@
+use crate::client_connection::{ClientConnection, ConnCommand};
 use crate::command::Command;
 use crate::connection::Connection;
 use crate::resp::RespValue;
@@ -12,7 +13,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 use tracing::{Instrument, info, info_span, instrument, warn};
 
 type Map = HashMap<String, RedisDataType>;
@@ -43,7 +44,7 @@ struct XReadListener {
 }
 
 #[derive(Debug)]
-enum CommandResponse {
+pub enum CommandResponse {
     NonBlocking(RespValue),
     BlockingOneshot((oneshot::Receiver<RespValue>, Option<Duration>)),
     BlockingMpsc((mpsc::Receiver<RespValue>, Option<Duration>)),
@@ -56,6 +57,7 @@ pub async fn run(listener: TcpListener, role: Role) -> anyhow::Result<()> {
     let addr = listener.local_addr()?;
 
     let (command_tx, command_rx) = mpsc::channel(100);
+
     let mut app = App::new(addr, command_rx, role);
 
     tokio::spawn(async move {
@@ -65,22 +67,36 @@ pub async fn run(listener: TcpListener, role: Role) -> anyhow::Result<()> {
     app.run().await
 }
 
+#[derive(Debug)]
 enum AppEvent {
-    KeyExpired { key: String },
-    ElementPushedToList { key: String },
-    EntryAddedToStream { key: String },
+    KeyExpired {
+        key: String,
+    },
+    ElementPushedToList {
+        key: String,
+    },
+    EntryAddedToStream {
+        key: String,
+    },
+    FullResyncWithReplica {
+        repl_id: Option<String>,
+        offset: i64,
+        replica_addr: SocketAddr,
+    },
 }
 
 struct App {
     map: Map,
     blpop_listeners: HashMap<String, Vec<BLPopListener>>,
     xread_listeners: HashMap<String, VecDeque<XReadListener>>,
+    replica_connections: HashMap<SocketAddr, mpsc::Sender<ConnCommand>>,
     command_rx: mpsc::Receiver<(Command, oneshot::Sender<CommandResponse>)>,
     events_tx: mpsc::Sender<AppEvent>,
     events_rx: mpsc::Receiver<AppEvent>,
     role: Role,
     addr: SocketAddr,
     replication_id: Option<String>,
+    rdb_data: Vec<u8>,
 }
 
 impl App {
@@ -92,6 +108,7 @@ impl App {
         let map = HashMap::new();
         let blpop_listeners = HashMap::new();
         let xread_listeners = HashMap::new();
+        let replica_connections = HashMap::new();
         let (events_tx, events_rx) = mpsc::channel(100);
 
         let replication_id = if let Role::Primary = role {
@@ -100,21 +117,28 @@ impl App {
             None
         };
 
+        let empty_rdb_file_hex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
+        let rdb_data = hex::decode(empty_rdb_file_hex).unwrap();
+
         Self {
             map,
             blpop_listeners,
             xread_listeners,
+            replica_connections,
             command_rx,
             events_tx,
             events_rx,
             role,
             addr,
             replication_id,
+            rdb_data,
         }
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {
-        self.perform_handshake().await?;
+        if let Role::ReplicaOf(_) = self.role {
+            self.perform_handshake_from_replica().await?;
+        }
 
         loop {
             select![
@@ -145,7 +169,7 @@ impl App {
     }
 
     #[instrument(skip(self))]
-    async fn perform_handshake(&mut self) -> anyhow::Result<()> {
+    async fn perform_handshake_from_replica(&mut self) -> anyhow::Result<()> {
         match self.role {
             Role::Primary => Ok(()),
             Role::ReplicaOf(primary) => {
@@ -217,6 +241,8 @@ impl App {
                     return Err(anyhow!("unable to handshake with primary redis instance"));
                 }
 
+                conn.read_rdb_data().await.unwrap();
+
                 Ok(())
             }
         }
@@ -233,6 +259,7 @@ impl App {
             .ok_or_else(|| anyhow!("no value read from connection"))
     }
 
+    #[instrument(skip(self))]
     async fn process_event(&mut self, event: AppEvent) -> anyhow::Result<()> {
         match event {
             AppEvent::KeyExpired { key } => {
@@ -249,6 +276,24 @@ impl App {
             }
             AppEvent::EntryAddedToStream { key } => {
                 self.notify_xread_listeners(&key).await?;
+            }
+            AppEvent::FullResyncWithReplica {
+                repl_id,
+                offset,
+                replica_addr,
+            } => {
+                if let Some(conn_tx) = self.replica_connections.get(&replica_addr) {
+                    conn_tx
+                        .send(ConnCommand::FullResync {
+                            repl_id,
+                            offset,
+                            replica_addr,
+                            data: self.rdb_data.clone(),
+                        })
+                        .await?;
+                } else {
+                    warn!("replica addr not in connections");
+                }
             }
         }
         Ok(())
@@ -662,18 +707,52 @@ impl App {
 
                 CommandResponse::NonBlocking(response)
             }
-            Command::ReplConf => {
+            Command::ReplConf { replica_addr, tx } => {
+                if let (Some(replica_addr), Some(tx)) = (replica_addr, tx) {
+                    self.replica_connections.insert(replica_addr, tx);
+                } else {
+                    warn!(?replica_addr, "got replconf without tx and/or replica_addr");
+                }
+
                 let response = RespValue::SimpleString(String::from("OK"));
                 CommandResponse::NonBlocking(response)
             }
-            Command::PSync => {
-                let id = match &self.replication_id {
-                    Some(id) => id,
-                    None => "NULL",
-                };
-                let data = format!("FULLRESYNC {} 0", id);
-                let response = RespValue::SimpleString(data);
-                CommandResponse::NonBlocking(response)
+            Command::PSync {
+                repl_id,
+                offset,
+                replica_addr,
+            } => {
+                if !(repl_id == None && offset == -1) {
+                    warn!(
+                        ?repl_id,
+                        ?offset,
+                        "psync with repl_id and offset not implemented yet"
+                    );
+
+                    CommandResponse::NonBlocking(RespValue::SimpleError(String::from(
+                        "psync not fully implemented yet",
+                    )))
+                } else {
+                    let id = match &self.replication_id {
+                        Some(id) => id,
+                        None => "NULL",
+                    };
+                    if let Some(replica_addr) = replica_addr {
+                        self.events_tx
+                            .send(AppEvent::FullResyncWithReplica {
+                                repl_id,
+                                offset,
+                                replica_addr,
+                            })
+                            .await?;
+                    } else {
+                        warn!(?replica_addr, "got PSync without replica_addr");
+                    }
+
+                    let data = format!("FULLRESYNC {} 0", id);
+                    let response = RespValue::SimpleString(data);
+                    CommandResponse::NonBlocking(response)
+                }
             }
         })
     }
@@ -803,129 +882,17 @@ async fn accept_listeners(
     tx: mpsc::Sender<(Command, oneshot::Sender<CommandResponse>)>,
 ) -> anyhow::Result<()> {
     loop {
-        let tx = tx.clone();
+        let command_tx = tx.clone();
         let (stream, socket) = listener.accept().await?;
 
-        let _: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-        info!("accepted new connection");
-        let mut connection = Connection::new(stream);
-            let mut transaction_queue: Option<Vec<Command>> = None;
-            loop {
-                let value = connection.read_value().await;
-
-
-                if let Some(value) = value? {
-                info!(?value, "got value on connection");
-
-                    match (&mut transaction_queue, Command::try_from(value)) {
-                        (Some(_), Ok(Command::Discard)) => {
-                            info!("discarding transaction");
-                            transaction_queue = None;
-                            let response = RespValue::SimpleString(String::from("OK"));
-                            connection.write_value(&response).await?;
-                        }
-                        (None, Ok(Command::Discard)) => {
-                            info!("ERR DISCARD without MULTI");
-
-                            let response =
-                                RespValue::SimpleError(String::from("ERR DISCARD without MULTI"));
-                            connection.write_value(&response).await?;
-                        }
-                        (Some(queue), Ok(Command::Exec)) => {
-                            info!(commands = ?queue, "executing transaction");
-                            let command = Command::Transaction {
-                                commands: std::mem::take(queue),
-                            };
-                            transaction_queue = None;
-                            let (resp_tx, resp_rx) = oneshot::channel();
-                            tx.send((command, resp_tx)).await?;
-
-                            let response = resp_rx.await?;
-                            let response = match response {
-                                CommandResponse::NonBlocking(response) => response,
-                                _ => RespValue::SimpleError(String::from("transaction failed")),
-                            };
-                            connection.write_value(&response).await?;
-                        }
-                        (None, Ok(Command::Exec)) => {
-                            info!("ERR EXEC without MULTI");
-                            let response =
-                                RespValue::SimpleError(String::from("ERR EXEC without MULTI"));
-                            connection.write_value(&response).await?;
-                        }
-                        (Some(_), Ok(Command::Multi)) => {
-                            info!("ERR MULTI calls can not be nested");
-                            let response = RespValue::SimpleError(String::from(
-                                "ERR MULTI calls can not be nested",
-                            ));
-                            connection.write_value(&response).await?;
-                        }
-                        (Some(queue), Ok(command)) => {
-                            info!(?command, "adding command to transaction");
-                            queue.push(command);
-                            let response = RespValue::SimpleString(String::from("QUEUED"));
-                            connection.write_value(&response).await?;
-                        }
-                        (None, Ok(Command::Multi)) => {
-                            info!("starting transaction");
-                            transaction_queue = Some(Vec::new());
-                            let response = RespValue::SimpleString(String::from("OK"));
-                            connection.write_value(&response).await?;
-                        }
-                        (None, Ok(command)) => {
-                            let (resp_tx, resp_rx) = oneshot::channel();
-                            tx.send((command, resp_tx)).await?;
-
-                            let response = resp_rx.await?;
-                            let to_send = match response {
-                                CommandResponse::NonBlocking(response) => response,
-                                CommandResponse::BlockingOneshot((rx, duration)) => {
-                                    match duration {
-                                        Some(duration) => match timeout(duration, rx).await {
-                                            Ok(Ok(value)) => value,
-                                            _ => RespValue::NullArray,
-                                        },
-                                        None => rx.await?,
-                                    }
-                                }
-                                CommandResponse::BlockingMpsc((mut rx, duration)) => match duration
-                                {
-                                    Some(duration) => match timeout(duration, rx.recv()).await {
-                                        Ok(Some(value)) => {
-                                            info!("got {:?} from mpsc channel", value);
-                                            rx.close();
-                                            value
-                                        }
-                                        e => {
-                                            info!(
-                                                "timeout reached for blocking mpsc receive, {:?}",
-                                                e
-                                            );
-                                            RespValue::NullArray
-                                        }
-                                    },
-                                    None => {
-                                        let value = rx
-                                            .recv()
-                                            .await
-                                            .ok_or_else(|| anyhow!("error on blocking receiver"))?;
-                                        rx.close();
-                                        value
-                                    }
-                                },
-                            };
-
-                            connection.write_value(&to_send).await?;
-                        }
-                        (_, Err(e)) => {
-                            let s = format!("{}", e);
-                            let to_send = RespValue::SimpleError(s);
-                            connection.write_value(&to_send).await?;
-                        }
-                    }
-                }
+        let _: JoinHandle<anyhow::Result<()>> = tokio::spawn(
+            async move {
+                info!("accepted new connection");
+                let mut client_connection = ClientConnection::new(stream, command_tx);
+                client_connection.run().await
             }
-        }.instrument(info_span!("client connection", addr = ?socket)));
+            .instrument(info_span!("client connection", addr = ?socket)),
+        );
     }
 }
 

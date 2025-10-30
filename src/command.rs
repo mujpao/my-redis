@@ -1,5 +1,8 @@
+use crate::client_connection::ConnCommand;
 use crate::resp::RespValue;
+use std::net::SocketAddr;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tracing::{info, instrument};
 
 #[derive(Debug)]
@@ -67,8 +70,15 @@ pub enum Command {
     Info {
         categories: Vec<String>,
     },
-    ReplConf,
-    PSync,
+    ReplConf {
+        replica_addr: Option<SocketAddr>,
+        tx: Option<mpsc::Sender<ConnCommand>>,
+    },
+    PSync {
+        repl_id: Option<String>,
+        offset: i64,
+        replica_addr: Option<SocketAddr>,
+    },
 }
 
 #[derive(Debug)]
@@ -556,8 +566,43 @@ impl TryFrom<RespValue> for Command {
                             }
                             Ok(Command::Info { categories })
                         }
-                        "REPLCONF" => Ok(Command::ReplConf),
-                        "PSYNC" => Ok(Command::PSync),
+                        "REPLCONF" => Ok(Command::ReplConf {
+                            replica_addr: None,
+                            tx: None,
+                        }),
+                        "PSYNC" => {
+                            if data.len() != 3 {
+                                let e = ParseCommandError::WrongNumberArguments;
+                                info!(reason = %e, ?resp_value, "invalid command");
+                                return Err(e);
+                            }
+                            match (&data[1], &data[2]) {
+                                (RespValue::BulkString(repl_id), RespValue::BulkString(offset)) => {
+                                    let offset: i64 = offset.parse().map_err(|e| {
+                                        let e2 = ParseCommandError::InvalidArgument;
+                                info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
+                                            e2
+                                    })?;
+
+                                    let repl_id = if repl_id == "?" {
+                                        None
+                                    } else {
+                                        Some(repl_id.clone())
+                                    };
+
+                                    Ok(Command::PSync {
+                                        repl_id,
+                                        offset,
+                                        replica_addr: None,
+                                    })
+                                }
+                                _ => {
+                                    let e = ParseCommandError::InvalidArgument;
+                                    info!(reason = %e, ?resp_value, "invalid command");
+                                    return Err(e);
+                                }
+                            }
+                        }
                         _ => {
                             let e = ParseCommandError::UnknownCommand;
                             info!(reason = %e, ?resp_value, "unknown command");
