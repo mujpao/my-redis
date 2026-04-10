@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{Instrument, info, info_span, instrument, warn};
 
@@ -20,7 +19,7 @@ type Map = HashMap<String, RedisDataType>;
 
 enum RedisDataType {
     String(Box<(String, Option<Instant>)>),
-    List(Box<VecDeque<RespValue>>),
+    List(VecDeque<RespValue>),
     Stream(Box<Stream>),
 }
 
@@ -194,7 +193,7 @@ impl App {
                     RespValue::Array(vec![
                         RespValue::BulkString(String::from("REPLCONF")),
                         RespValue::BulkString(String::from("listening-port")),
-                        RespValue::BulkString(String::from(port)),
+                        RespValue::BulkString(port),
                     ]),
                     &mut conn,
                 )
@@ -263,12 +262,11 @@ impl App {
     async fn process_event(&mut self, event: AppEvent) -> anyhow::Result<()> {
         match event {
             AppEvent::KeyExpired { key } => {
-                if let Some(RedisDataType::String(b)) = self.map.get(&key) {
-                    if let (_, Some(key_expires_at)) = **b {
-                        if key_expires_at < Instant::now() {
-                            self.map.remove(&key);
-                        }
-                    }
+                if let Some(RedisDataType::String(b)) = self.map.get(&key)
+                    && let (_, Some(key_expires_at)) = **b
+                    && key_expires_at < Instant::now()
+                {
+                    self.map.remove(&key);
                 }
             }
             AppEvent::ElementPushedToList { key } => {
@@ -327,11 +325,8 @@ impl App {
                 value,
                 expiry_duration,
             } => {
-                let expiry_time = if let Some(duration) = expiry_duration {
-                    Some(Instant::now() + duration)
-                } else {
-                    None
-                };
+                let expiry_time = expiry_duration.map(|duration| Instant::now() + duration);
+
                 self.map.insert(
                     key.to_string(),
                     RedisDataType::String(Box::new((value.to_string(), expiry_time))),
@@ -370,7 +365,7 @@ impl App {
                         let len = elements.len();
                         self.map.insert(
                             key.to_string(),
-                            RedisDataType::List(Box::new(VecDeque::from(elements))),
+                            RedisDataType::List(VecDeque::from(elements)),
                         );
                         RespValue::Integer(len as i64)
                     }
@@ -399,8 +394,7 @@ impl App {
 
                         let len = list.len();
 
-                        self.map
-                            .insert(key.to_string(), RedisDataType::List(Box::new(list)));
+                        self.map.insert(key.to_string(), RedisDataType::List(list));
 
                         RespValue::Integer(len as i64)
                     }
@@ -454,14 +448,10 @@ impl App {
                 CommandResponse::NonBlocking(response)
             }
             Command::BLPop { key, timeout } => {
-                let elem = self
-                    .map
-                    .get_mut(&key)
-                    .map(|data| match data {
-                        RedisDataType::List(list) => list.pop_front(),
-                        _ => None,
-                    })
-                    .flatten();
+                let elem = self.map.get_mut(&key).and_then(|data| match data {
+                    RedisDataType::List(list) => list.pop_front(),
+                    _ => None,
+                });
 
                 match elem {
                     Some(elem) => CommandResponse::NonBlocking(RespValue::Array(vec![
@@ -470,14 +460,11 @@ impl App {
                     ])),
                     None => {
                         let (tx, rx) = oneshot::channel();
-                        let duration = timeout.map(|timeout| Duration::from_secs_f64(timeout));
+                        let duration = timeout.map(Duration::from_secs_f64);
 
                         let expires_at = duration.map(|duration| Instant::now() + duration);
 
-                        let list = self
-                            .blpop_listeners
-                            .entry(key.to_string())
-                            .or_insert_with(|| Vec::new());
+                        let list = self.blpop_listeners.entry(key.to_string()).or_default();
                         list.push(BLPopListener { tx, expires_at });
                         CommandResponse::BlockingOneshot((rx, duration))
                     }
@@ -485,7 +472,9 @@ impl App {
             }
             Command::Type { key } => {
                 let response = match self.map.get(&key) {
-                    Some(RedisDataType::String(_)) => RespValue::SimpleString("string".to_string()),
+                    Some(RedisDataType::String(..)) => {
+                        RespValue::SimpleString("string".to_string())
+                    }
                     Some(RedisDataType::List(_)) => RespValue::SimpleString("list".to_string()),
                     Some(RedisDataType::Stream(_)) => RespValue::SimpleString("stream".to_string()),
                     None => RespValue::SimpleString("none".to_string()),
@@ -552,71 +541,65 @@ impl App {
                 keys_and_ids,
                 timeout,
             } => {
-                let response = {
-                    let mut result = vec![];
-                    let mut pairs = vec![];
-                    for (key, last_id) in &keys_and_ids {
-                        let stream_data = {
-                            match self.map.get_mut(key) {
-                                Some(RedisDataType::Stream(stream)) => {
-                                    let last_id = match last_id.as_str() {
-                                        "$" => stream.get_last_id(),
-                                        id => Some(id.to_string()),
-                                    };
+                let mut result = vec![];
+                let mut pairs = vec![];
+                for (key, last_id) in &keys_and_ids {
+                    let stream_data = {
+                        match self.map.get_mut(key) {
+                            Some(RedisDataType::Stream(stream)) => {
+                                let last_id = match last_id.as_str() {
+                                    "$" => stream.get_last_id(),
+                                    id => Some(id.to_string()),
+                                };
 
-                                    pairs.push((key.to_string(), last_id.clone()));
+                                pairs.push((key.to_string(), last_id.clone()));
 
-                                    match stream.get_after_id(last_id.as_deref()) {
-                                        Ok(values) => {
-                                            if values.len() > 0 {
-                                                RespValue::Array(values)
-                                            } else {
-                                                RespValue::NullArray
-                                            }
+                                match stream.get_after_id(last_id.as_deref()) {
+                                    Ok(values) => {
+                                        if !values.is_empty() {
+                                            RespValue::Array(values)
+                                        } else {
+                                            RespValue::NullArray
                                         }
-                                        Err(e) => RespValue::SimpleError(e.to_string()),
                                     }
+                                    Err(e) => RespValue::SimpleError(e.to_string()),
                                 }
-                                None => RespValue::SimpleError(String::from("Stream not found")),
-                                _ => RespValue::SimpleError(String::from("Key is not a stream")),
+                            }
+                            None => RespValue::SimpleError(String::from("Stream not found")),
+                            _ => RespValue::SimpleError(String::from("Key is not a stream")),
+                        }
+                    };
+
+                    if let RespValue::Array(_) = stream_data {
+                        let stream_data =
+                            RespValue::Array(vec![RespValue::BulkString(key.into()), stream_data]);
+                        result.push(stream_data);
+                    }
+                }
+
+                if result.is_empty() {
+                    if let Some(timeout) = timeout {
+                        let (tx, rx) = mpsc::channel(1);
+                        let (duration, expires_at) = {
+                            match timeout {
+                                0 => (None, None),
+                                timeout => {
+                                    let duration = Duration::from_millis(timeout);
+                                    let expires_at = Instant::now() + duration;
+                                    (Some(duration), Some(expires_at))
+                                }
                             }
                         };
 
-                        if let RespValue::Array(_) = stream_data {
-                            let stream_data = RespValue::Array(vec![
-                                RespValue::BulkString(key.into()),
-                                stream_data,
-                            ]);
-                            result.push(stream_data);
-                        }
-                    }
+                        self.add_xread_listeners(&pairs, tx, expires_at)?;
 
-                    if result.len() == 0 {
-                        if let Some(timeout) = timeout {
-                            let (tx, rx) = mpsc::channel(1);
-                            let (duration, expires_at) = {
-                                match timeout {
-                                    0 => (None, None),
-                                    timeout => {
-                                        let duration = Duration::from_millis(timeout);
-                                        let expires_at = Instant::now() + duration;
-                                        (Some(duration), Some(expires_at))
-                                    }
-                                }
-                            };
-
-                            self.add_xread_listeners(&pairs, tx, expires_at)?;
-
-                            CommandResponse::BlockingMpsc((rx, duration))
-                        } else {
-                            CommandResponse::NonBlocking(RespValue::NullArray)
-                        }
+                        CommandResponse::BlockingMpsc((rx, duration))
                     } else {
-                        CommandResponse::NonBlocking(RespValue::Array(result))
+                        CommandResponse::NonBlocking(RespValue::NullArray)
                     }
-                };
-
-                response
+                } else {
+                    CommandResponse::NonBlocking(RespValue::Array(result))
+                }
             }
             Command::Incr { key } => {
                 let response = match self.map.get_mut(&key) {
@@ -679,27 +662,24 @@ impl App {
             Command::Info { categories } => {
                 let mut info = String::new();
                 for category in categories {
-                    match category.as_str().to_lowercase().as_str() {
-                        "replication" => {
-                            let data = match (&self.role, &self.replication_id) {
-                                (Role::Primary, Some(replication_id)) => {
-                                    format!(
-                                        "role:master\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
-                                        replication_id, 0
-                                    )
-                                }
-                                (Role::Primary, None) => {
-                                    warn!("primary instance doesn't have a replication id");
-                                    format!(
-                                        "role:master\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
-                                        "NULL", 0
-                                    )
-                                }
-                                (Role::ReplicaOf(_), _) => "role:slave".to_string(),
-                            };
-                            info.push_str(&data);
-                        }
-                        _ => {}
+                    if category.as_str().to_lowercase().as_str() == "replication" {
+                        let data = match (&self.role, &self.replication_id) {
+                            (Role::Primary, Some(replication_id)) => {
+                                format!(
+                                    "role:master\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
+                                    replication_id, 0
+                                )
+                            }
+                            (Role::Primary, None) => {
+                                warn!("primary instance doesn't have a replication id");
+                                format!(
+                                    "role:master\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
+                                    "NULL", 0
+                                )
+                            }
+                            (Role::ReplicaOf(_), _) => "role:slave".to_string(),
+                        };
+                        info.push_str(&data);
                     }
                 }
 
@@ -722,7 +702,7 @@ impl App {
                 offset,
                 replica_addr,
             } => {
-                if !(repl_id == None && offset == -1) {
+                if !(repl_id.is_none() && offset == -1) {
                     warn!(
                         ?repl_id,
                         ?offset,
@@ -766,14 +746,11 @@ impl App {
         for (key, last_id) in pairs {
             let listener = XReadListener {
                 tx: tx.clone(),
-                expires_at: expires_at,
+                expires_at,
                 last_seen_id: last_id.clone(),
             };
 
-            let listeners = self
-                .xread_listeners
-                .entry(key.to_string())
-                .or_insert_with(|| VecDeque::new());
+            let listeners = self.xread_listeners.entry(key.to_string()).or_default();
             listeners.push_back(listener);
         }
 
@@ -782,96 +759,90 @@ impl App {
 
     #[instrument(skip(self))]
     async fn notify_xread_listeners(&mut self, key: &String) -> anyhow::Result<()> {
-        match self.xread_listeners.remove(key) {
-            Some(mut listeners) => {
-                let mut new_listeners = VecDeque::new();
+        if let Some(mut listeners) = self.xread_listeners.remove(key) {
+            let mut new_listeners = VecDeque::new();
 
-                while !listeners.is_empty() {
-                    let listener = listeners
-                        .pop_front()
-                        .ok_or_else(|| anyhow!("listeners is empty"))?;
+            while !listeners.is_empty() {
+                let listener = listeners
+                    .pop_front()
+                    .ok_or_else(|| anyhow!("listeners is empty"))?;
 
-                    if listener.tx.is_closed() {
-                        info!("xread channel has closed");
-                        continue;
-                    }
-
-                    if let Some(expires_at) = listener.expires_at {
-                        if expires_at < Instant::now() {
-                            info!("xread listener has expired");
-                            let to_send = RespValue::NullArray;
-                            let _ = listener.tx.send(to_send).await;
-                            continue;
-                        }
-                    }
-
-                    if let Some(RedisDataType::Stream(stream)) = self.map.get_mut(key) {
-                        match stream.get_after_id(listener.last_seen_id.as_deref()) {
-                            Ok(values) => {
-                                // Only notify the listener if there are new values in stream
-                                if values.len() > 0 {
-                                    let to_send = RespValue::Array(vec![RespValue::Array(vec![
-                                        RespValue::BulkString(key.into()),
-                                        RespValue::Array(values),
-                                    ])]);
-
-                                    let _ = listener.tx.send(to_send).await;
-                                    continue;
-                                }
-                            }
-                            Err(e) => {
-                                info!(reason=?e,"error getting stream");
-                            }
-                        }
-                    }
-
-                    new_listeners.push_back(listener);
+                if listener.tx.is_closed() {
+                    info!("xread channel has closed");
+                    continue;
                 }
 
-                self.xread_listeners.insert(key.clone(), new_listeners);
+                if let Some(expires_at) = listener.expires_at
+                    && expires_at < Instant::now()
+                {
+                    info!("xread listener has expired");
+                    let to_send = RespValue::NullArray;
+                    let _ = listener.tx.send(to_send).await;
+                    continue;
+                }
+
+                if let Some(RedisDataType::Stream(stream)) = self.map.get_mut(key) {
+                    match stream.get_after_id(listener.last_seen_id.as_deref()) {
+                        Ok(values) => {
+                            // Only notify the listener if there are new values in stream
+                            if !values.is_empty() {
+                                let to_send = RespValue::Array(vec![RespValue::Array(vec![
+                                    RespValue::BulkString(key.into()),
+                                    RespValue::Array(values),
+                                ])]);
+
+                                let _ = listener.tx.send(to_send).await;
+                                continue;
+                            }
+                        }
+                        Err(e) => {
+                            info!(reason=?e,"error getting stream");
+                        }
+                    }
+                }
+
+                new_listeners.push_back(listener);
             }
-            _ => {}
+
+            self.xread_listeners.insert(key.clone(), new_listeners);
         }
         Ok(())
     }
 
     #[instrument(skip(self))]
     fn notify_blpop_listeners(&mut self, key: &String) -> anyhow::Result<()> {
-        match self.blpop_listeners.remove(key) {
-            Some(mut listeners) => {
-                listeners = listeners
-                    .into_iter()
-                    .filter_map(|listener| {
-                        if let Some(expires_at) = listener.expires_at {
-                            if expires_at < Instant::now() {
-                                info!("blpop listener has expired");
-                                let to_send = RespValue::NullArray;
+        if let Some(mut listeners) = self.blpop_listeners.remove(key) {
+            listeners = listeners
+                .into_iter()
+                .filter_map(|listener| {
+                    if let Some(expires_at) = listener.expires_at
+                        && expires_at < Instant::now()
+                    {
+                        info!("blpop listener has expired");
+                        let to_send = RespValue::NullArray;
+                        let _ = listener.tx.send(to_send);
+                        return None;
+                    }
+
+                    if let Some(RedisDataType::List(list)) = self.map.get_mut(key) {
+                        match list.pop_front() {
+                            Some(elem) => {
+                                let to_send = RespValue::Array(vec![
+                                    RespValue::BulkString(key.clone()),
+                                    elem,
+                                ]);
                                 let _ = listener.tx.send(to_send);
-                                return None;
+                                None
                             }
+                            None => Some(listener),
                         }
+                    } else {
+                        Some(listener)
+                    }
+                })
+                .collect();
 
-                        if let Some(RedisDataType::List(list)) = self.map.get_mut(key) {
-                            match list.pop_front() {
-                                Some(elem) => {
-                                    let to_send = RespValue::Array(vec![
-                                        RespValue::BulkString(key.clone()),
-                                        elem,
-                                    ]);
-                                    let _ = listener.tx.send(to_send);
-                                    None
-                                }
-                                None => Some(listener),
-                            }
-                        } else {
-                            Some(listener)
-                        }
-                    })
-                    .collect();
-
-                self.blpop_listeners.insert(key.clone(), listeners);
-            }
-            _ => {}
+            self.blpop_listeners.insert(key.clone(), listeners);
         }
         Ok(())
     }
@@ -885,7 +856,7 @@ async fn accept_listeners(
         let command_tx = tx.clone();
         let (stream, socket) = listener.accept().await?;
 
-        let _: JoinHandle<anyhow::Result<()>> = tokio::spawn(
+        tokio::spawn(
             async move {
                 info!("accepted new connection");
                 let mut client_connection = ClientConnection::new(stream, command_tx);
@@ -924,7 +895,7 @@ fn lpop(key: &String, count: Option<usize>, map: &mut Map) -> RespValue {
                 }
             }
         }
-        Some(RedisDataType::String(_)) => RespValue::SimpleError(String::from("Wrong type")),
+        Some(RedisDataType::String(..)) => RespValue::SimpleError(String::from("Wrong type")),
         _ => RespValue::NullBulkString,
     }
 }

@@ -2,7 +2,6 @@ use clap::Parser;
 use codecrafters_redis::app::{Role, run};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::net::TcpListener;
-use tracing_subscriber;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -16,7 +15,7 @@ struct Args {
 fn validate_primary_address(s: &str) -> Result<SocketAddr, String> {
     let s: Vec<&str> = s.split(' ').collect();
     if s.len() != 2 {
-        return Err(format!("Unable to parse ip address of primary"));
+        return Err("Unable to parse ip address of primary".to_string());
     }
     let ip_addr: Ipv4Addr = match s[0] {
         "localhost" => Ipv4Addr::LOCALHOST,

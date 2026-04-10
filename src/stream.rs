@@ -57,7 +57,7 @@ impl Stream {
         };
 
         let id = StreamId {
-            milliseconds_time: milliseconds_time,
+            milliseconds_time,
             sequence_number,
         };
 
@@ -70,10 +70,10 @@ impl Stream {
             return Err(StreamError::IdEqualsZero);
         }
 
-        if let Some(last_entry_id) = &self.last_entry_id {
-            if *last_entry_id >= id {
-                return Err(StreamError::NewIdLtePrevious);
-            }
+        if let Some(last_entry_id) = &self.last_entry_id
+            && *last_entry_id >= id
+        {
+            return Err(StreamError::NewIdLtePrevious);
         }
         self.data.insert(id.clone(), data);
         self.last_entry_id = Some(id.clone());
@@ -93,10 +93,10 @@ impl Stream {
         let mut values_in_range = vec![];
 
         for (id, data) in self.data.iter() {
-            if let Some(ref last_id) = last_id {
-                if *id <= *last_id {
-                    continue;
-                }
+            if let Some(ref last_id) = last_id
+                && *id <= *last_id
+            {
+                continue;
             }
             let mut value_as_resp = vec![RespValue::BulkString(id.to_string())];
 
@@ -246,7 +246,7 @@ pub struct StreamId {
 impl StreamId {
     pub fn from_range(range: &str, end: bool) -> anyhow::Result<StreamId> {
         let split_s: Vec<_> = range.split("-").collect();
-        if split_s.len() == 2 && split_s[1].len() > 0 {
+        if split_s.len() == 2 && !split_s[1].is_empty() {
             let milliseconds_time = split_s[0]
                 .parse::<usize>()
                 .map_err(|e| anyhow!("Unable to parse stream id ms time, {:?}", e))?;
@@ -259,7 +259,7 @@ impl StreamId {
                 milliseconds_time,
                 sequence_number,
             })
-        } else if split_s.len() == 2 && split_s[1].len() == 0 || split_s.len() == 1 {
+        } else if split_s.len() == 2 && split_s[1].is_empty() || split_s.len() == 1 {
             let milliseconds_time = split_s[0]
                 .parse::<usize>()
                 .map_err(|e| anyhow!("Unable to parse stream range start id ms time, {:?}", e))?;

@@ -109,7 +109,7 @@ impl TryFrom<RespValue> for Command {
     fn try_from(resp_value: RespValue) -> Result<Self, Self::Error> {
         match resp_value {
             RespValue::Array(ref data) => {
-                if data.len() == 0 {
+                if data.is_empty() {
                     return Err(ParseCommandError::InvalidCommandName);
                 }
                 if let RespValue::BulkString(command_name) = &data[0] {
@@ -127,7 +127,7 @@ impl TryFrom<RespValue> for Command {
                             } else {
                                 let e = ParseCommandError::InvalidArgument;
                                 info!(reason = %e, ?resp_value, "invalid command");
-                                return Err(e);
+                                Err(e)
                             }
                         }
                         "SET" => {
@@ -205,7 +205,7 @@ impl TryFrom<RespValue> for Command {
                                 _ => {
                                     let e = ParseCommandError::InvalidArgument;
                                     info!(reason = %e, ?resp_value, "invalid command");
-                                    return Err(e);
+                                    Err(e)
                                 }
                             }
                         }
@@ -224,7 +224,7 @@ impl TryFrom<RespValue> for Command {
                                 _ => {
                                     let e = ParseCommandError::InvalidArgument;
                                     info!(reason = %e, ?resp_value, "invalid command");
-                                    return Err(e);
+                                    Err(e)
                                 }
                             }
                         }
@@ -243,7 +243,7 @@ impl TryFrom<RespValue> for Command {
                                 _ => {
                                     let e = ParseCommandError::InvalidArgument;
                                     info!(reason = %e, ?resp_value, "invalid command");
-                                    return Err(e);
+                                    Err(e)
                                 }
                             }
                         }
@@ -281,7 +281,7 @@ impl TryFrom<RespValue> for Command {
                                 _ => {
                                     let e = ParseCommandError::InvalidArgument;
                                     info!(reason = %e, ?resp_value, "invalid command");
-                                    return Err(e);
+                                    Err(e)
                                 }
                             }
                         }
@@ -298,7 +298,7 @@ impl TryFrom<RespValue> for Command {
                                 _ => {
                                     let e = ParseCommandError::InvalidArgument;
                                     info!(reason = %e, ?resp_value, "invalid command");
-                                    return Err(e);
+                                    Err(e)
                                 }
                             }
                         }
@@ -334,7 +334,7 @@ impl TryFrom<RespValue> for Command {
                                 _ => {
                                     let e = ParseCommandError::InvalidArgument;
                                     info!(reason = %e, ?resp_value, "invalid command");
-                                    return Err(e);
+                                    Err(e)
                                 }
                             }
                         }
@@ -369,7 +369,7 @@ impl TryFrom<RespValue> for Command {
                                 _ => {
                                     let e = ParseCommandError::InvalidArgument;
                                     info!(reason = %e, ?resp_value, "invalid command");
-                                    return Err(e);
+                                    Err(e)
                                 }
                             }
                         }
@@ -386,7 +386,7 @@ impl TryFrom<RespValue> for Command {
                                 _ => {
                                     let e = ParseCommandError::InvalidArgument;
                                     info!(reason = %e, ?resp_value, "invalid command");
-                                    return Err(e);
+                                    Err(e)
                                 }
                             }
                         }
@@ -408,7 +408,7 @@ impl TryFrom<RespValue> for Command {
                                                 RespValue::BulkString(value),
                                             ) => {
                                                 pairs.push((field.to_string(), value.to_string()));
-                                                field_idx = field_idx + 2;
+                                                field_idx += 2;
                                                 value_idx = field_idx + 1;
                                             }
                                             _ => {
@@ -427,7 +427,7 @@ impl TryFrom<RespValue> for Command {
                                 _ => {
                                     let e = ParseCommandError::InvalidArgument;
                                     info!(reason = %e, ?resp_value, "invalid command");
-                                    return Err(e);
+                                    Err(e)
                                 }
                             }
                         }
@@ -450,7 +450,7 @@ impl TryFrom<RespValue> for Command {
                                 _ => {
                                     let e = ParseCommandError::InvalidArgument;
                                     info!(reason = %e, ?resp_value, "invalid command");
-                                    return Err(e);
+                                    Err(e)
                                 }
                             }
                         }
@@ -543,7 +543,7 @@ impl TryFrom<RespValue> for Command {
                                 _ => {
                                     let e = ParseCommandError::InvalidArgument;
                                     info!(reason = %e, ?resp_value, "invalid command");
-                                    return Err(e);
+                                    Err(e)
                                 }
                             }
                         }
@@ -599,26 +599,26 @@ impl TryFrom<RespValue> for Command {
                                 _ => {
                                     let e = ParseCommandError::InvalidArgument;
                                     info!(reason = %e, ?resp_value, "invalid command");
-                                    return Err(e);
+                                    Err(e)
                                 }
                             }
                         }
                         _ => {
                             let e = ParseCommandError::UnknownCommand;
                             info!(reason = %e, ?resp_value, "unknown command");
-                            return Err(e);
+                            Err(e)
                         }
                     }
                 } else {
                     let e = ParseCommandError::InvalidCommandName;
                     info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    Err(e)
                 }
             }
             _ => {
                 let e = ParseCommandError::InvalidRespData;
                 info!(reason = %e, ?resp_value, "invalid command");
-                return Err(e);
+                Err(e)
             }
         }
     }

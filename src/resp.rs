@@ -52,7 +52,7 @@ impl RespValue {
             }
             b':' => {
                 let s = get_line(data)?;
-                let i = str::from_utf8(&s)
+                let i = str::from_utf8(s)
                     .map_err(|e| ParseError::Other(e.into()))?
                     .parse::<i64>()
                     .map_err(|e| ParseError::Other(e.into()))?;
@@ -64,7 +64,7 @@ impl RespValue {
                 if *line == *b"-1" {
                     Ok(RespValue::NullArray)
                 } else {
-                    let len: usize = str::from_utf8(&line)
+                    let len: usize = str::from_utf8(line)
                         .map_err(|e| ParseError::Other(e.into()))?
                         .parse::<usize>()
                         .map_err(|e| ParseError::Other(e.into()))?;
@@ -87,7 +87,7 @@ impl RespValue {
 
 fn get_line<'a>(data: &mut Cursor<&'a [u8]>) -> Result<&'a [u8], ParseError> {
     let start = data.position() as usize;
-    let crlf_start_index = &data.get_ref()[start..]
+    let crlf_start_index = data.get_ref()[start..]
         .windows(2)
         .position(|x| x == b"\r\n")
         .ok_or_else(|| ParseError::Incomplete)?

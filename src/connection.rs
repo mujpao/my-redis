@@ -28,7 +28,7 @@ impl Connection {
             .map_err(|e| anyhow!("error getting client addr: {:?}", e))
     }
 
-    pub async fn write_rdb_data(&mut self, data: &Vec<u8>) -> anyhow::Result<()> {
+    pub async fn write_rdb_data(&mut self, data: &[u8]) -> anyhow::Result<()> {
         self.stream.write_u8(b'$').await?;
         self.stream
             .write_all(data.len().to_string().as_bytes())
