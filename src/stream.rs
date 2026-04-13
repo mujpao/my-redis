@@ -37,15 +37,10 @@ impl Stream {
             match id.sequence_number {
                 Some(sequence_number) => sequence_number,
                 None => {
-                    if let Some(last_entry_id) = &self.last_entry_id {
-                        if milliseconds_time == last_entry_id.milliseconds_time {
-                            last_entry_id.sequence_number + 1
-                        } else {
-                            match milliseconds_time {
-                                0 => 1,
-                                _ => 0,
-                            }
-                        }
+                    if let Some(last_entry_id) = &self.last_entry_id
+                        && milliseconds_time == last_entry_id.milliseconds_time
+                    {
+                        last_entry_id.sequence_number + 1
                     } else {
                         match milliseconds_time {
                             0 => 1,

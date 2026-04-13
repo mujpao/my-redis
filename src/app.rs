@@ -135,8 +135,8 @@ impl App {
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {
-        if let Role::ReplicaOf(_) = self.role {
-            self.perform_handshake_from_replica().await?;
+        if let Role::ReplicaOf(primary) = self.role {
+            perform_handshake_from_replica(primary, self.addr.port()).await?;
         }
 
         loop {
@@ -165,97 +165,6 @@ impl App {
                 }
             ];
         }
-    }
-
-    #[instrument(skip(self))]
-    async fn perform_handshake_from_replica(&mut self) -> anyhow::Result<()> {
-        match self.role {
-            Role::Primary => Ok(()),
-            Role::ReplicaOf(primary) => {
-                let stream = TcpStream::connect(primary).await?;
-                let mut conn = Connection::new(stream);
-                let result = App::send_command(
-                    RespValue::Array(vec![RespValue::BulkString(String::from("PING"))]),
-                    &mut conn,
-                )
-                .await?;
-
-                if result != RespValue::SimpleString(String::from("PONG")) {
-                    warn!(?primary, ?result, "unable to handshake with primary");
-                    return Err(anyhow!("unable to handshake with primary redis instance"));
-                } else {
-                    info!(?primary, "got pong from primary");
-                }
-
-                let port = self.addr.port().to_string();
-
-                let result = App::send_command(
-                    RespValue::Array(vec![
-                        RespValue::BulkString(String::from("REPLCONF")),
-                        RespValue::BulkString(String::from("listening-port")),
-                        RespValue::BulkString(port),
-                    ]),
-                    &mut conn,
-                )
-                .await?;
-
-                if result != RespValue::SimpleString(String::from("OK")) {
-                    warn!(?primary, ?result, "unable to handshake with primary");
-                    return Err(anyhow!("unable to handshake with primary redis instance"));
-                } else {
-                    info!(?primary, "got OK from primary");
-                }
-
-                let result = App::send_command(
-                    RespValue::Array(vec![
-                        RespValue::BulkString(String::from("REPLCONF")),
-                        RespValue::BulkString(String::from("capa")),
-                        RespValue::BulkString(String::from("psync2")),
-                    ]),
-                    &mut conn,
-                )
-                .await?;
-
-                if result != RespValue::SimpleString(String::from("OK")) {
-                    warn!(?primary, ?result, "unable to handshake with primary");
-                    return Err(anyhow!("unable to handshake with primary redis instance"));
-                } else {
-                    info!(?primary, "got OK from primary");
-                }
-
-                let result = App::send_command(
-                    RespValue::Array(vec![
-                        RespValue::BulkString(String::from("PSYNC")),
-                        RespValue::BulkString(String::from("?")),
-                        RespValue::BulkString(String::from("-1")),
-                    ]),
-                    &mut conn,
-                )
-                .await?;
-
-                if let RespValue::SimpleString(_) = result {
-                    info!(?primary, ?result, "got response to psync");
-                } else {
-                    warn!(?primary, ?result, "unable to handshake with primary");
-                    return Err(anyhow!("unable to handshake with primary redis instance"));
-                }
-
-                let _ = conn.read_rdb_data().await;
-
-                Ok(())
-            }
-        }
-    }
-
-    async fn send_command(command: RespValue, conn: &mut Connection) -> anyhow::Result<RespValue> {
-        conn.write_value(&command).await.map_err(|e| {
-            warn!(?command, reason = ?e, "Unable to send command to primary");
-            anyhow!("unable to send command")
-        })?;
-
-        conn.read_value()
-            .await?
-            .ok_or_else(|| anyhow!("no value read from connection"))
     }
 
     #[instrument(skip(self))]
@@ -898,4 +807,88 @@ fn lpop(key: &String, count: Option<usize>, map: &mut Map) -> RespValue {
         Some(RedisDataType::String(..)) => RespValue::SimpleError(String::from("Wrong type")),
         _ => RespValue::NullBulkString,
     }
+}
+
+#[instrument]
+async fn perform_handshake_from_replica(primary: SocketAddr, port: u16) -> anyhow::Result<()> {
+    let stream = TcpStream::connect(primary).await?;
+    let mut conn = Connection::new(stream);
+    let result = send_command(
+        RespValue::Array(vec![RespValue::BulkString(String::from("PING"))]),
+        &mut conn,
+    )
+    .await?;
+
+    if result != RespValue::SimpleString(String::from("PONG")) {
+        warn!(?primary, ?result, "unable to handshake with primary");
+        return Err(anyhow!("unable to handshake with primary redis instance"));
+    } else {
+        info!(?primary, "got pong from primary");
+    }
+
+    let result = send_command(
+        RespValue::Array(vec![
+            RespValue::BulkString(String::from("REPLCONF")),
+            RespValue::BulkString(String::from("listening-port")),
+            RespValue::BulkString(port.to_string()),
+        ]),
+        &mut conn,
+    )
+    .await?;
+
+    if result != RespValue::SimpleString(String::from("OK")) {
+        warn!(?primary, ?result, "unable to handshake with primary");
+        return Err(anyhow!("unable to handshake with primary redis instance"));
+    } else {
+        info!(?primary, "got OK from primary");
+    }
+
+    let result = send_command(
+        RespValue::Array(vec![
+            RespValue::BulkString(String::from("REPLCONF")),
+            RespValue::BulkString(String::from("capa")),
+            RespValue::BulkString(String::from("psync2")),
+        ]),
+        &mut conn,
+    )
+    .await?;
+
+    if result != RespValue::SimpleString(String::from("OK")) {
+        warn!(?primary, ?result, "unable to handshake with primary");
+        return Err(anyhow!("unable to handshake with primary redis instance"));
+    } else {
+        info!(?primary, "got OK from primary");
+    }
+
+    let result = send_command(
+        RespValue::Array(vec![
+            RespValue::BulkString(String::from("PSYNC")),
+            RespValue::BulkString(String::from("?")),
+            RespValue::BulkString(String::from("-1")),
+        ]),
+        &mut conn,
+    )
+    .await?;
+
+    if let RespValue::SimpleString(_) = result {
+        info!(?primary, ?result, "got response to psync");
+    } else {
+        warn!(?primary, ?result, "unable to handshake with primary");
+        return Err(anyhow!("unable to handshake with primary redis instance"));
+    }
+
+    let _ = conn.read_rdb_data().await;
+
+    Ok(())
+}
+
+async fn send_command(command: RespValue, conn: &mut Connection) -> anyhow::Result<RespValue> {
+    conn.write_value(&command).await.map_err(|e| {
+        warn!(?command, reason = ?e, "Unable to send command to primary");
+        anyhow!("unable to send command")
+    })?;
+
+    conn.read_value()
+        .await?
+        .ok_or_else(|| anyhow!("no value read from connection"))
 }
