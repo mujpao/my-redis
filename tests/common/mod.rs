@@ -1,7 +1,7 @@
 use codecrafters_redis::app::{Role, run};
 use redis::aio::MultiplexedConnection;
 use tokio::net::TcpListener;
-use tracing_subscriber::{filter::EnvFilter, filter::LevelFilter, fmt, layer::SubscriberExt};
+use tracing_subscriber::{filter::EnvFilter, fmt, layer::SubscriberExt};
 
 fn setup_tracing() {
     let subscriber = tracing_subscriber::registry()

@@ -103,3 +103,49 @@ async fn primary_responds_to_replication_handshake() {
 
     handle.await.unwrap();
 }
+
+#[tokio::test]
+async fn set_and_get_commands_propagate_to_single_replica() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn_primary = client.get_multiplexed_async_connection().await.unwrap();
+
+    let mut conn_replica = setup_replica(port).await;
+
+    let data: String = redis::cmd("SET")
+        .arg("foo")
+        .arg("bar")
+        .query_async(&mut conn_primary)
+        .await
+        .unwrap();
+    assert_eq!(data, "OK");
+
+    let data: String = redis::cmd("GET")
+        .arg("foo")
+        .query_async(&mut conn_primary)
+        .await
+        .unwrap();
+    assert_eq!(data, "bar");
+
+    let data: String = redis::cmd("GET")
+        .arg("foo")
+        .query_async(&mut conn_replica)
+        .await
+        .expect("failed to execute GET");
+    assert_eq!(data, "bar");
+
+    let data: redis::Value = redis::cmd("GET")
+        .arg("keydoesn'texist")
+        .query_async(&mut conn_primary)
+        .await
+        .unwrap();
+    assert_eq!(data, redis::Value::Nil);
+
+    let data: redis::Value = redis::cmd("GET")
+        .arg("keydoesn'texist")
+        .query_async(&mut conn_replica)
+        .await
+        .unwrap();
+    assert_eq!(data, redis::Value::Nil);
+}
