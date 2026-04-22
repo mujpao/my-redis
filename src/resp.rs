@@ -1,3 +1,4 @@
+use crate::command::Command;
 use anyhow::anyhow;
 use bytes::Buf;
 use std::io::Cursor;
@@ -95,6 +96,38 @@ fn get_line<'a>(data: &mut Cursor<&'a [u8]>) -> Result<&'a [u8], ParseError> {
 
     data.set_position((crlf_start_index + 2) as u64);
     Ok(&data.get_ref()[start..crlf_start_index])
+}
+
+impl TryFrom<Command> for RespValue {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Command) -> Result<Self, Self::Error> {
+        match value {
+            Command::Ping => Ok(RespValue::Array(vec![RespValue::BulkString(String::from(
+                "PING",
+            ))])),
+            Command::Echo(s) => Ok(RespValue::Array(vec![
+                RespValue::BulkString(String::from("ECHO")),
+                RespValue::BulkString(s),
+            ])),
+            Command::Set {
+                key,
+                value,
+                expiry_duration,
+            } => {
+                if expiry_duration.is_some() {
+                    Err(anyhow!("Respvalue from command not fully implemented"))
+                } else {
+                    Ok(RespValue::Array(vec![
+                        RespValue::BulkString(String::from("SET")),
+                        RespValue::BulkString(key),
+                        RespValue::BulkString(value),
+                    ]))
+                }
+            }
+            _ => Err(anyhow!("Respvalue from command not fully implemented")),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -252,5 +285,38 @@ mod tests {
         let s = Bytes::from("$5\r\nhello");
         let result = parse_next(s);
         assert!(matches!(result.unwrap_err(), ParseError::Incomplete));
+    }
+
+    #[test]
+    fn command_to_resp() {
+        let command = Command::Ping;
+        assert_eq!(
+            RespValue::try_from(command).unwrap(),
+            RespValue::Array(vec![RespValue::BulkString(String::from("PING"))])
+        );
+
+        let command = Command::Echo("hello".to_string());
+        assert_eq!(
+            RespValue::try_from(command).unwrap(),
+            RespValue::Array(vec![
+                RespValue::BulkString(String::from("ECHO")),
+                RespValue::BulkString(String::from("hello")),
+            ])
+        );
+
+        let command = Command::Set {
+            key: "foo".to_string(),
+            value: "bar".to_string(),
+            expiry_duration: None,
+        };
+
+        assert_eq!(
+            RespValue::try_from(command).unwrap(),
+            RespValue::Array(vec![
+                RespValue::BulkString(String::from("SET")),
+                RespValue::BulkString(String::from("foo")),
+                RespValue::BulkString(String::from("bar")),
+            ])
+        );
     }
 }

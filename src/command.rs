@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, instrument};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Command {
     Ping,
     Echo(String),
@@ -79,6 +79,24 @@ pub enum Command {
         offset: i64,
         replica_addr: Option<SocketAddr>,
     },
+}
+
+impl Command {
+    pub fn is_write(&self) -> bool {
+        match self {
+            Command::Ping
+            | Command::Echo(_)
+            | Command::Get { .. }
+            | Command::LRange { .. }
+            | Command::LLen { .. }
+            | Command::Type { .. }
+            | Command::Info { .. }
+            | Command::ReplConf { .. }
+            | Command::PSync { .. } => false,
+            // TODO what about multi, exec, etc...
+            _ => true,
+        }
+    }
 }
 
 #[derive(Debug)]

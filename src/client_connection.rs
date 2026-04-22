@@ -17,9 +17,12 @@ pub enum ConnCommand {
         replica_addr: SocketAddr,
         data: Vec<u8>,
     },
+    PropagateCommand {
+        command: Command,
+    },
 }
 
-/// Handles communication from the redis instance to a client or replica instance
+/// Represents a connection between the redis instance and a client or replica instance
 pub struct ClientConnection {
     connection: Connection,
     transaction_queue: Option<Vec<Command>>,
@@ -59,17 +62,24 @@ impl ClientConnection {
                 }
                 maybe_event = self.events_rx.recv() => {
                     match maybe_event {
-                         Some(ConnCommand::FullResync { replica_addr, data,..})   => {
+                        Some(ConnCommand::FullResync { replica_addr, data,..}) => {
                             if self.connection.get_client_addr()? != replica_addr {
                                 warn!(?replica_addr, "replica addr doesn't match");
                                 continue;
                             }
 
                             self.connection.write_rdb_data(&data).await?;
-                          },
-                         None  => {
-                             return Err(anyhow!("event channel closed"));
-                         },
+                        },
+                        Some(ConnCommand::PropagateCommand {command}) => {
+                            if let Ok(resp) = command.try_into() {
+                                self.connection.write_value(&resp).await?;
+                            } else {
+                                warn!("unable to propagate command");
+                            }
+                        }
+                        None => {
+                            return Err(anyhow!("event channel closed"));
+                        },
                     }
                 }
             ];

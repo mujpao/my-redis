@@ -1,7 +1,9 @@
 use crate::common::{setup, setup_replica};
 use codecrafters_redis::connection::Connection;
 use codecrafters_redis::resp::RespValue;
+use std::time::Duration;
 use tokio::net::TcpStream;
+use tokio::time::sleep;
 
 mod common;
 
@@ -112,6 +114,8 @@ async fn set_and_get_commands_propagate_to_single_replica() {
     let mut conn_primary = client.get_multiplexed_async_connection().await.unwrap();
 
     let mut conn_replica = setup_replica(port).await;
+
+    sleep(Duration::from_millis(500)).await;
 
     let data: String = redis::cmd("SET")
         .arg("foo")

@@ -82,6 +82,9 @@ enum AppEvent {
         offset: i64,
         replica_addr: SocketAddr,
     },
+    GotPropagatedCommand {
+        command: Command,
+    },
 }
 
 struct App {
@@ -136,7 +139,17 @@ impl App {
 
     async fn run(&mut self) -> anyhow::Result<()> {
         if let Role::ReplicaOf(primary) = self.role {
-            perform_handshake_from_replica(primary, self.addr.port()).await?;
+            let conn = perform_handshake_from_replica(primary, self.addr.port()).await?;
+
+            let events_tx = self.events_tx.clone();
+            tokio::spawn(
+                async move {
+                    if let Err(e) = listen_for_propagated_commands(conn, events_tx).await {
+                        warn!("error getting propagated command, {}", e);
+                    }
+                }
+                .instrument(info_span!("connection to primary", addr = ?primary)),
+            );
         }
 
         loop {
@@ -199,8 +212,11 @@ impl App {
                         })
                         .await?;
                 } else {
-                    warn!("replica addr not in connections");
+                    warn!("replica addr not in connections, {}", replica_addr);
                 }
+            }
+            AppEvent::GotPropagatedCommand { command } => {
+                self.process_propagated_command(command).await?;
             }
         }
         Ok(())
@@ -211,22 +227,39 @@ impl App {
         command: Command,
         resp_tx: oneshot::Sender<CommandResponse>,
     ) -> anyhow::Result<()> {
-        let response = self.execute_command(command).await?;
+        let response = self.execute_command(&command).await?;
+
+        if command.is_write() {
+            for conn_tx in self.replica_connections.values() {
+                tracing::info!(command = ?command, "propagating command");
+                conn_tx
+                    .send(ConnCommand::PropagateCommand {
+                        command: command.clone(),
+                    })
+                    .await?;
+            }
+        }
+
         resp_tx
             .send(response)
             .map_err(|e| anyhow!("failed to send command response {:?}", e))
     }
 
-    #[instrument(skip(self))]
-    async fn execute_command(&mut self, command: Command) -> anyhow::Result<CommandResponse> {
+    async fn process_propagated_command(&mut self, command: Command) -> anyhow::Result<()> {
+        self.execute_command(&command).await?;
+        Ok(())
+    }
+
+    #[instrument(skip(self), fields(role = ?self.role))]
+    async fn execute_command(&mut self, command: &Command) -> anyhow::Result<CommandResponse> {
         info!("received command");
-        Ok(match command {
+        let result = match command {
             Command::Ping => {
                 let response = RespValue::SimpleString(String::from("PONG"));
                 CommandResponse::NonBlocking(response)
             }
             Command::Echo(s) => {
-                let response = RespValue::BulkString(s);
+                let response = RespValue::BulkString(s.clone());
                 CommandResponse::NonBlocking(response)
             }
             Command::Set {
@@ -244,6 +277,8 @@ impl App {
                 let tx_cloned = self.events_tx.clone();
 
                 if let Some(duration) = expiry_duration {
+                    let duration = *duration;
+                    let key = key.clone();
                     tokio::spawn(async move {
                         sleep(duration).await;
                         tx_cloned.send(AppEvent::KeyExpired { key }).await?;
@@ -256,7 +291,7 @@ impl App {
                 CommandResponse::NonBlocking(response)
             }
             Command::Get { key } => {
-                let response = match self.map.get(&key) {
+                let response = match self.map.get(key) {
                     Some(RedisDataType::String(value)) => RespValue::BulkString(value.0.clone()),
                     None => RespValue::NullBulkString,
                     _ => RespValue::SimpleError(String::from("Wrong type")),
@@ -265,16 +300,16 @@ impl App {
                 CommandResponse::NonBlocking(response)
             }
             Command::RPush { key, elements } => {
-                let response = match self.map.get_mut(&key) {
+                let response = match self.map.get_mut(key) {
                     Some(RedisDataType::List(list)) => {
-                        list.extend(elements);
+                        list.extend(elements.clone());
                         RespValue::Integer(list.len() as i64)
                     }
                     None => {
                         let len = elements.len();
                         self.map.insert(
                             key.to_string(),
-                            RedisDataType::List(VecDeque::from(elements)),
+                            RedisDataType::List(VecDeque::from(elements.clone())),
                         );
                         RespValue::Integer(len as i64)
                     }
@@ -282,23 +317,23 @@ impl App {
                 };
 
                 self.events_tx
-                    .send(AppEvent::ElementPushedToList { key })
+                    .send(AppEvent::ElementPushedToList { key: key.clone() })
                     .await?;
 
                 CommandResponse::NonBlocking(response)
             }
             Command::LPush { key, elements } => {
-                let response = match self.map.get_mut(&key) {
+                let response = match self.map.get_mut(key) {
                     Some(RedisDataType::List(list)) => {
                         for elem in elements {
-                            list.push_front(elem);
+                            list.push_front(elem.clone());
                         }
                         RespValue::Integer(list.len() as i64)
                     }
                     None => {
                         let mut list = VecDeque::new();
                         for elem in elements {
-                            list.push_front(elem);
+                            list.push_front(elem.clone());
                         }
 
                         let len = list.len();
@@ -311,23 +346,23 @@ impl App {
                 };
 
                 self.events_tx
-                    .send(AppEvent::ElementPushedToList { key })
+                    .send(AppEvent::ElementPushedToList { key: key.clone() })
                     .await?;
                 CommandResponse::NonBlocking(response)
             }
             Command::LRange { key, start, stop } => {
-                let value = match self.map.get(&key) {
+                let value = match self.map.get(key) {
                     Some(RedisDataType::List(entry)) => {
-                        let start: usize = if start < 0 {
+                        let start: usize = if *start < 0 {
                             std::cmp::max(start + entry.len() as i64, 0) as usize
                         } else {
-                            start as usize
+                            *start as usize
                         };
 
-                        let mut stop: usize = if stop < 0 {
+                        let mut stop: usize = if *stop < 0 {
                             std::cmp::max(stop + entry.len() as i64, 0) as usize
                         } else {
-                            stop as usize
+                            *stop as usize
                         };
 
                         if start >= entry.len() || start > stop {
@@ -343,7 +378,7 @@ impl App {
                 CommandResponse::NonBlocking(RespValue::Array(value))
             }
             Command::LLen { key } => {
-                let response = match self.map.get(&key) {
+                let response = match self.map.get(key) {
                     Some(RedisDataType::List(list)) => RespValue::Integer(list.len() as i64),
                     None => RespValue::Integer(0),
                     _ => RespValue::SimpleError(String::from("Wrong type")),
@@ -352,12 +387,12 @@ impl App {
                 CommandResponse::NonBlocking(response)
             }
             Command::LPop { key, count } => {
-                let response = lpop(&key, count, &mut self.map);
+                let response = lpop(key, *count, &mut self.map);
 
                 CommandResponse::NonBlocking(response)
             }
             Command::BLPop { key, timeout } => {
-                let elem = self.map.get_mut(&key).and_then(|data| match data {
+                let elem = self.map.get_mut(key).and_then(|data| match data {
                     RedisDataType::List(list) => list.pop_front(),
                     _ => None,
                 });
@@ -380,7 +415,7 @@ impl App {
                 }
             }
             Command::Type { key } => {
-                let response = match self.map.get(&key) {
+                let response = match self.map.get(key) {
                     Some(RedisDataType::String(..)) => {
                         RespValue::SimpleString("string".to_string())
                     }
@@ -392,14 +427,17 @@ impl App {
                 CommandResponse::NonBlocking(response)
             }
             Command::XAdd { key, id, pairs } => {
-                let response = match StreamIdInput::from_str(&id) {
+                let response = match StreamIdInput::from_str(id) {
                     Ok(id) => {
                         let mut data = Vec::new();
                         for (field, value) in pairs {
-                            data.push(StreamData { field, value });
+                            data.push(StreamData {
+                                field: field.clone(),
+                                value: value.clone(),
+                            });
                         }
 
-                        match self.map.get_mut(&key) {
+                        match self.map.get_mut(key) {
                             Some(RedisDataType::Stream(stream)) => match stream.append(id, data) {
                                 Ok(id) => RespValue::BulkString(id.to_string()),
                                 Err(e) => RespValue::SimpleError(e.to_string()),
@@ -427,15 +465,15 @@ impl App {
                 };
 
                 self.events_tx
-                    .send(AppEvent::EntryAddedToStream { key })
+                    .send(AppEvent::EntryAddedToStream { key: key.clone() })
                     .await?;
 
                 CommandResponse::NonBlocking(response)
             }
             Command::XRange { key, start, end } => {
                 let response = {
-                    match self.map.get_mut(&key) {
-                        Some(RedisDataType::Stream(stream)) => match stream.range(&start, &end) {
+                    match self.map.get_mut(key) {
+                        Some(RedisDataType::Stream(stream)) => match stream.range(start, end) {
                             Ok(values) => values,
                             Err(e) => RespValue::SimpleError(e.to_string()),
                         },
@@ -452,7 +490,7 @@ impl App {
             } => {
                 let mut result = vec![];
                 let mut pairs = vec![];
-                for (key, last_id) in &keys_and_ids {
+                for (key, last_id) in keys_and_ids {
                     let stream_data = {
                         match self.map.get_mut(key) {
                             Some(RedisDataType::Stream(stream)) => {
@@ -493,7 +531,7 @@ impl App {
                             match timeout {
                                 0 => (None, None),
                                 timeout => {
-                                    let duration = Duration::from_millis(timeout);
+                                    let duration = Duration::from_millis(*timeout);
                                     let expires_at = Instant::now() + duration;
                                     (Some(duration), Some(expires_at))
                                 }
@@ -511,7 +549,7 @@ impl App {
                 }
             }
             Command::Incr { key } => {
-                let response = match self.map.get_mut(&key) {
+                let response = match self.map.get_mut(key) {
                     Some(RedisDataType::String(b)) => match b.0.parse::<i64>() {
                         Ok(int_value) => {
                             let new_value = int_value + 1;
@@ -598,7 +636,7 @@ impl App {
             }
             Command::ReplConf { replica_addr, tx } => {
                 if let (Some(replica_addr), Some(tx)) = (replica_addr, tx) {
-                    self.replica_connections.insert(replica_addr, tx);
+                    self.replica_connections.insert(*replica_addr, tx.clone());
                 } else {
                     warn!(?replica_addr, "got replconf without tx and/or replica_addr");
                 }
@@ -611,7 +649,7 @@ impl App {
                 offset,
                 replica_addr,
             } => {
-                if !(repl_id.is_none() && offset == -1) {
+                if !(repl_id.is_none() && *offset == -1) {
                     warn!(
                         ?repl_id,
                         ?offset,
@@ -629,9 +667,9 @@ impl App {
                     if let Some(replica_addr) = replica_addr {
                         self.events_tx
                             .send(AppEvent::FullResyncWithReplica {
-                                repl_id,
-                                offset,
-                                replica_addr,
+                                repl_id: repl_id.clone(),
+                                offset: *offset,
+                                replica_addr: *replica_addr,
                             })
                             .await?;
                     } else {
@@ -643,7 +681,9 @@ impl App {
                     CommandResponse::NonBlocking(response)
                 }
             }
-        })
+        };
+
+        Ok(result)
     }
 
     fn add_xread_listeners(
@@ -810,10 +850,13 @@ fn lpop(key: &String, count: Option<usize>, map: &mut Map) -> RespValue {
 }
 
 #[instrument]
-async fn perform_handshake_from_replica(primary: SocketAddr, port: u16) -> anyhow::Result<()> {
+async fn perform_handshake_from_replica(
+    primary: SocketAddr,
+    port: u16,
+) -> anyhow::Result<Connection> {
     let stream = TcpStream::connect(primary).await?;
     let mut conn = Connection::new(stream);
-    let result = send_command(
+    let result = send_command_from_replica(
         RespValue::Array(vec![RespValue::BulkString(String::from("PING"))]),
         &mut conn,
     )
@@ -826,7 +869,7 @@ async fn perform_handshake_from_replica(primary: SocketAddr, port: u16) -> anyho
         info!(?primary, "got pong from primary");
     }
 
-    let result = send_command(
+    let result = send_command_from_replica(
         RespValue::Array(vec![
             RespValue::BulkString(String::from("REPLCONF")),
             RespValue::BulkString(String::from("listening-port")),
@@ -843,7 +886,7 @@ async fn perform_handshake_from_replica(primary: SocketAddr, port: u16) -> anyho
         info!(?primary, "got OK from primary");
     }
 
-    let result = send_command(
+    let result = send_command_from_replica(
         RespValue::Array(vec![
             RespValue::BulkString(String::from("REPLCONF")),
             RespValue::BulkString(String::from("capa")),
@@ -860,7 +903,7 @@ async fn perform_handshake_from_replica(primary: SocketAddr, port: u16) -> anyho
         info!(?primary, "got OK from primary");
     }
 
-    let result = send_command(
+    let result = send_command_from_replica(
         RespValue::Array(vec![
             RespValue::BulkString(String::from("PSYNC")),
             RespValue::BulkString(String::from("?")),
@@ -879,16 +922,37 @@ async fn perform_handshake_from_replica(primary: SocketAddr, port: u16) -> anyho
 
     let _ = conn.read_rdb_data().await;
 
-    Ok(())
+    Ok(conn)
 }
 
-async fn send_command(command: RespValue, conn: &mut Connection) -> anyhow::Result<RespValue> {
-    conn.write_value(&command).await.map_err(|e| {
-        warn!(?command, reason = ?e, "Unable to send command to primary");
-        anyhow!("unable to send command")
-    })?;
+async fn send_command_from_replica(
+    command: RespValue,
+    conn: &mut Connection,
+) -> anyhow::Result<RespValue> {
+    conn.write_value(&command)
+        .await
+        .map_err(|e| anyhow!("unable to send command {}", e))?;
 
     conn.read_value()
         .await?
         .ok_or_else(|| anyhow!("no value read from connection"))
+}
+
+async fn listen_for_propagated_commands(
+    mut conn: Connection,
+    events_tx: mpsc::Sender<AppEvent>,
+) -> anyhow::Result<()> {
+    info!("starting to listen for propagated commands");
+    loop {
+        let command = conn
+            .read_value()
+            .await?
+            .ok_or_else(|| anyhow!("no value read from connection"))?
+            .try_into()
+            .map_err(|e| anyhow!("{}", e))?;
+
+        let _ = events_tx
+            .send(AppEvent::GotPropagatedCommand { command })
+            .await;
+    }
 }
