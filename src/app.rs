@@ -927,7 +927,6 @@ async fn perform_handshake_from_replica(
         }
         Err(e) => {
             tracing::error!(rdb_data_on_replica = ?e);
-            return Err(e);
         }
     }
 
