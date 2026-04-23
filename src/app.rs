@@ -921,7 +921,15 @@ async fn perform_handshake_from_replica(
     }
 
     let data = conn.read_rdb_data().await;
-    warn!(rdb_data_on_replica = ?data);
+    match data {
+        Ok(data) => {
+            info!(rdb_data_on_replica = ?data);
+        }
+        Err(e) => {
+            tracing::error!(rdb_data_on_replica = ?e);
+            return Err(e);
+        }
+    }
 
     Ok(conn)
 }

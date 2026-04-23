@@ -29,7 +29,6 @@ impl Connection {
     }
 
     pub async fn write_rdb_data(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        warn!("starting to write rdb data");
         self.stream.write_u8(b'$').await?;
         self.stream
             .write_all(data.len().to_string().as_bytes())
@@ -39,16 +38,11 @@ impl Connection {
 
         self.stream.flush().await?;
 
-        warn!("flushed rdb data");
-
-
         Ok(())
     }
 
     pub async fn read_rdb_data(&mut self) -> anyhow::Result<Vec<u8>> {
-        warn!("here");
         let c = self.stream.read_u8().await?;
-        warn!("here2");
 
         if c != b'$' {
             warn!(c, "read invalid rdb data");
@@ -58,7 +52,6 @@ impl Connection {
         let mut length_as_bytes = vec![];
         loop {
             let c = self.stream.read_u8().await?;
-            warn!(c);
             if c.is_ascii_digit() {
                 length_as_bytes.push(c);
             } else {
@@ -72,8 +65,6 @@ impl Connection {
         }
 
         let len: usize = str::from_utf8(&length_as_bytes)?.parse::<usize>()?;
-
-        warn!(len);
 
         let mut buffer = vec![0; len];
 

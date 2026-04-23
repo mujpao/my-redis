@@ -1,7 +1,7 @@
 use crate::common::{setup, setup_replica};
+use codecrafters_redis::command::Command;
 use codecrafters_redis::connection::Connection;
 use codecrafters_redis::resp::RespValue;
-use codecrafters_redis::command::Command;
 use rand::distr::Alphanumeric;
 use rand::distr::SampleString;
 use std::time::Duration;
@@ -164,7 +164,7 @@ async fn replica_can_process_commands() {
     let port = listener.local_addr().unwrap().port();
 
     let handle = tokio::spawn(async move {
-        let (stream, socket) = listener.accept().await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
 
         let mut conn = Connection::new(stream);
         let ping = conn.read_value().await.unwrap();
@@ -194,7 +194,8 @@ async fn replica_can_process_commands() {
 
         let replication_id = Alphanumeric.sample_string(&mut rand::rng(), 40);
 
-        let psync = conn.read_value().await.unwrap();
+        // psync
+        let _ = conn.read_value().await.unwrap();
         let data = format!("FULLRESYNC {} 0", replication_id);
         let response = RespValue::SimpleString(data);
         conn.write_value(&response).await.unwrap();
@@ -203,27 +204,26 @@ async fn replica_can_process_commands() {
         let rdb_data = hex::decode(empty_rdb_file_hex).unwrap();
         conn.write_rdb_data(&rdb_data).await.unwrap();
 
-        tracing::warn!("sent rdb file");
-
         let command = Command::Set {
             key: "foo".to_string(),
             value: "bar".to_string(),
             expiry_duration: None,
         };
 
+        conn.write_value(&command.try_into().unwrap())
+            .await
+            .unwrap();
 
-        conn.write_value(&command.try_into().unwrap()).await.unwrap();
-
-conn
+        conn
     });
 
     let mut conn_replica = setup_replica(port).await;
 
-    sleep(Duration::from_millis(500)).await;
+    sleep(Duration::from_millis(300)).await;
 
     handle.await.unwrap();
 
-     let data: String = redis::cmd("GET")
+    let data: String = redis::cmd("GET")
         .arg("foo")
         .query_async(&mut conn_replica)
         .await
