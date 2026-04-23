@@ -68,6 +68,7 @@ impl ClientConnection {
                                 continue;
                             }
 
+                            warn!("sending rdb file");
                             self.connection.write_rdb_data(&data).await?;
                         },
                         Some(ConnCommand::PropagateCommand {command}) => {

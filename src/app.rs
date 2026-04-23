@@ -920,7 +920,8 @@ async fn perform_handshake_from_replica(
         return Err(anyhow!("unable to handshake with primary redis instance"));
     }
 
-    let _ = conn.read_rdb_data().await;
+    let data = conn.read_rdb_data().await;
+    warn!(rdb_data_on_replica = ?data);
 
     Ok(conn)
 }
