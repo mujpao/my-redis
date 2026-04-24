@@ -1,5 +1,5 @@
 use crate::client_connection::ConnCommand;
-use crate::resp::RespValue;
+use crate::frame::resp::RespValue;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -605,7 +605,7 @@ impl TryFrom<RespValue> for Command {
                             _ => {
                                 let e = ParseCommandError::InvalidArgument;
                                 info!(reason = %e, ?resp_value, "invalid command");
-                                return Err(e);
+                                Err(e)
                             }
                         }
                     }

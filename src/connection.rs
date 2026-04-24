@@ -1,11 +1,10 @@
-use crate::resp::{ParseError, RespValue};
+use crate::frame::{Frame, ParseError, resp::RespValue};
 use anyhow::anyhow;
 use bytes::{Buf, BytesMut};
 use std::io::Cursor;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::TcpStream;
-use tracing::warn;
 
 pub struct Connection {
     stream: BufWriter<TcpStream>,
@@ -15,7 +14,6 @@ pub struct Connection {
 impl Connection {
     pub fn new(stream: TcpStream) -> Self {
         Self {
-            // TODO change size
             stream: BufWriter::new(stream),
             buffer: BytesMut::with_capacity(4 * 1024),
         }
@@ -41,47 +39,14 @@ impl Connection {
         Ok(())
     }
 
-    pub async fn read_rdb_data(&mut self) -> anyhow::Result<Vec<u8>> {
-        let c = self.stream.read_u8().await?;
-
-        if c != b'$' {
-            warn!(c, "read invalid rdb data");
-            return Err(anyhow!("invalid rdb data"));
-        }
-
-        let mut length_as_bytes = vec![];
+    pub async fn read_value<T: Frame>(&mut self) -> anyhow::Result<Option<T>> {
         loop {
-            let c = self.stream.read_u8().await?;
-            if c.is_ascii_digit() {
-                length_as_bytes.push(c);
-            } else {
-                let next = self.stream.read_u8().await?;
-                if c == b'\r' && next == b'\n' {
-                    break;
-                } else {
-                    return Err(anyhow!("invalid rdb data"));
-                }
-            }
-        }
-
-        let len: usize = str::from_utf8(&length_as_bytes)?.parse::<usize>()?;
-
-        let mut buffer = vec![0; len];
-
-        self.stream.read_exact(&mut buffer).await?;
-
-        Ok(buffer)
-    }
-
-    pub async fn read_value(&mut self) -> anyhow::Result<Option<RespValue>> {
-        loop {
-            if let Some(frame) = self.parse_frame()? {
+            if let Some(frame) = self.parse_frame::<T>()? {
                 return Ok(Some(frame));
             }
 
             if 0 == self.stream.read_buf(&mut self.buffer).await? {
                 if self.buffer.is_empty() {
-                    // TODO
                     return Ok(None);
                 } else {
                     return Err(anyhow!("connection reset by peer"));
@@ -90,15 +55,17 @@ impl Connection {
         }
     }
 
-    fn parse_frame(&mut self) -> anyhow::Result<Option<RespValue>> {
+    fn parse_frame<T: Frame>(&mut self) -> anyhow::Result<Option<T>> {
         let mut buf = Cursor::new(&self.buffer[..]);
 
-        match RespValue::parse_next(&mut buf) {
-            Ok(value) => {
+        match T::check(&mut buf) {
+            Ok(_) => {
                 let len = buf.position() as usize;
+                buf.set_position(0);
+                let frame = T::parse(&mut buf)?;
                 self.buffer.advance(len);
 
-                Ok(Some(value))
+                Ok(Some(frame))
             }
             Err(ParseError::Incomplete) => Ok(None),
             Err(ParseError::Other(e)) => Err(anyhow!("failed to parse: {:?}", e)),

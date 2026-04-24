@@ -1,6 +1,10 @@
 use crate::common::setup;
 use chrono::DateTime;
+use codecrafters_redis::connection::Connection;
+use codecrafters_redis::frame::{rdb::RdbData, resp::RespValue};
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::sleep;
 
 mod common;
@@ -1989,4 +1993,64 @@ async fn transaction_can_be_discarded() {
         .await
         .unwrap();
     assert_eq!(data, "bar");
+}
+
+#[tokio::test]
+async fn can_parse_frames_from_same_tcp_read() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let rdb_file_data = RdbData::new_empty().unwrap();
+    let expected_rdb_data = rdb_file_data.0.clone();
+
+    let handle = tokio::spawn(async move {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+
+        let resync = "+FULLRESYNC 75cd7bc10c49047e0d163660f3b90625b1af31dc 0\r\n".as_bytes();
+        stream.write_all(&resync).await.unwrap();
+
+        let start = "$".as_bytes();
+        let newline = "\r\n".as_bytes();
+        let rdb_data = [
+            start,
+            rdb_file_data.0.len().to_string().as_bytes(),
+            newline,
+            &rdb_file_data.0,
+        ]
+        .concat();
+        stream.write_all(&rdb_data).await.unwrap();
+
+        let set = "*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$7\r\nmyvalue\r\n".as_bytes();
+        stream.write_all(&set).await.unwrap();
+
+        stream.flush().await.unwrap();
+        stream
+    });
+
+    let (stream, _) = listener.accept().await.unwrap();
+
+    let mut conn = Connection::new(stream);
+
+    let value = conn.read_value::<RespValue>().await.unwrap().unwrap();
+    assert_eq!(
+        value,
+        RespValue::SimpleString(String::from(
+            "FULLRESYNC 75cd7bc10c49047e0d163660f3b90625b1af31dc 0"
+        ))
+    );
+
+    let rdb_value = conn.read_value::<RdbData>().await.unwrap().unwrap();
+    assert_eq!(expected_rdb_data, rdb_value.0);
+
+    let value = conn.read_value::<RespValue>().await.unwrap().unwrap();
+    let expected_command = RespValue::Array(vec![
+        RespValue::BulkString("SET".into()),
+        RespValue::BulkString("mykey".into()),
+        RespValue::BulkString("myvalue".into()),
+    ]);
+    assert_eq!(value, expected_command);
+
+    handle.await.unwrap();
 }

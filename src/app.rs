@@ -1,7 +1,8 @@
 use crate::client_connection::{ClientConnection, ConnCommand};
 use crate::command::Command;
 use crate::connection::Connection;
-use crate::resp::RespValue;
+use crate::frame::rdb::RdbData;
+use crate::frame::resp::RespValue;
 use crate::stream::{Stream, StreamData, StreamIdInput};
 use anyhow::anyhow;
 use rand::distr::{Alphanumeric, SampleString};
@@ -101,7 +102,7 @@ struct App {
     role: Role,
     addr: SocketAddr,
     replication_id: Option<String>,
-    rdb_data: Vec<u8>,
+    rdb_data: RdbData,
 }
 
 impl App {
@@ -122,8 +123,7 @@ impl App {
             None
         };
 
-        let empty_rdb_file_hex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
-        let rdb_data = hex::decode(empty_rdb_file_hex).unwrap();
+        let rdb_data = RdbData::new_empty().unwrap();
 
         Self {
             map,
@@ -219,7 +219,7 @@ impl App {
                             repl_id,
                             offset,
                             replica_addr,
-                            data: self.rdb_data.clone(),
+                            data: self.rdb_data.0.clone(),
                         })
                         .await?;
                 } else {
@@ -957,7 +957,7 @@ async fn perform_handshake_from_replica(
         return Err(anyhow!("unable to handshake with primary redis instance"));
     }
 
-    let data = conn.read_rdb_data().await;
+    let data = conn.read_value::<RdbData>().await;
     match data {
         Ok(data) => {
             info!(rdb_data_on_replica = ?data);
@@ -978,7 +978,7 @@ async fn send_command_from_replica(
         .await
         .map_err(|e| anyhow!("unable to send command {}", e))?;
 
-    conn.read_value()
+    conn.read_value::<RespValue>()
         .await?
         .ok_or_else(|| anyhow!("no value read from connection"))
 }
@@ -991,7 +991,7 @@ async fn listen_for_propagated_commands(
     info!("starting to listen for propagated commands");
     loop {
         select![
-            maybe_command = conn.read_value() => {
+            maybe_command = conn.read_value::<RespValue>() => {
                 let command = maybe_command?
                     .ok_or_else(|| anyhow!("no value read from connection"))?
                     .try_into()

@@ -1,7 +1,8 @@
 use crate::common::{setup, setup_replica};
 use codecrafters_redis::command::Command;
 use codecrafters_redis::connection::Connection;
-use codecrafters_redis::resp::RespValue;
+use codecrafters_redis::frame::rdb::RdbData;
+use codecrafters_redis::frame::resp::RespValue;
 use rand::distr::Alphanumeric;
 use rand::distr::SampleString;
 use std::time::Duration;
@@ -103,8 +104,8 @@ async fn primary_responds_to_replication_handshake() {
         let empty_rdb_file_hex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
         let rdb_data = hex::decode(empty_rdb_file_hex).unwrap();
 
-        let response = conn.read_rdb_data().await.unwrap();
-        assert_eq!(response, rdb_data);
+        let response = conn.read_value::<RdbData>().await.unwrap().unwrap();
+        assert_eq!(response.0, rdb_data);
     });
 
     handle.await.unwrap();
@@ -245,14 +246,14 @@ async fn handshake_with_client(listener: TcpListener) -> Connection {
         .unwrap();
 
     // replconf 1
-    let _ = conn.read_value().await.unwrap();
+    let _ = conn.read_value::<RespValue>().await.unwrap();
 
     conn.write_value(&RespValue::SimpleString(String::from("OK")))
         .await
         .unwrap();
 
     // replconf 2
-    let _ = conn.read_value().await.unwrap();
+    let _ = conn.read_value::<RespValue>().await.unwrap();
     conn.write_value(&RespValue::SimpleString(String::from("OK")))
         .await
         .unwrap();
@@ -260,7 +261,7 @@ async fn handshake_with_client(listener: TcpListener) -> Connection {
     let replication_id = Alphanumeric.sample_string(&mut rand::rng(), 40);
 
     // psync
-    let _ = conn.read_value().await.unwrap();
+    let _ = conn.read_value::<RespValue>().await.unwrap();
     let data = format!("FULLRESYNC {} 0", replication_id);
     let response = RespValue::SimpleString(data);
     conn.write_value(&response).await.unwrap();

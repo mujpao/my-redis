@@ -1,7 +1,7 @@
 use crate::app::CommandResponse;
 use crate::command::Command;
 use crate::connection::Connection;
-use crate::resp::RespValue;
+use crate::frame::resp::RespValue;
 use anyhow::anyhow;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
@@ -55,7 +55,7 @@ impl ClientConnection {
     pub async fn run(&mut self) -> anyhow::Result<()> {
         loop {
             select![
-                maybe_value = self.connection.read_value() => {
+                maybe_value = self.connection.read_value::<RespValue>() => {
                     if let Some(value) = maybe_value? {
                         self.handle_resp_value(value).await?;
                     }
