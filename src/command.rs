@@ -79,6 +79,7 @@ pub enum Command {
         offset: i64,
         replica_addr: Option<SocketAddr>,
     },
+    ReplConfGetAck,
 }
 
 impl Command {
@@ -582,10 +583,32 @@ impl TryFrom<RespValue> for Command {
                         }
                         Ok(Command::Info { categories })
                     }
-                    "REPLCONF" => Ok(Command::ReplConf {
-                        replica_addr: None,
-                        tx: None,
-                    }),
+                    "REPLCONF" => {
+                        if data.len() != 3 {
+                            let e = ParseCommandError::WrongNumberArguments;
+                            info!(reason = %e, ?resp_value, "invalid command");
+                            return Err(e);
+                        }
+
+                        let RespValue::BulkString(arg) = &data[1] else {
+                            let e = ParseCommandError::InvalidArgument;
+                            info!(reason = %e, ?resp_value, "invalid command");
+                            return Err(e);
+                        };
+
+                        match arg.to_lowercase().as_str() {
+                            "listening-port" | "capa" => Ok(Command::ReplConf {
+                                replica_addr: None,
+                                tx: None,
+                            }),
+                            "getack" => Ok(Command::ReplConfGetAck),
+                            _ => {
+                                let e = ParseCommandError::InvalidArgument;
+                                info!(reason = %e, ?resp_value, "invalid command");
+                                return Err(e);
+                            }
+                        }
+                    }
                     "PSYNC" => {
                         if data.len() != 3 {
                             let e = ParseCommandError::WrongNumberArguments;

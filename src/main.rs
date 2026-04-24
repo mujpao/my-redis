@@ -39,7 +39,10 @@ async fn main() -> anyhow::Result<()> {
 
     let role = {
         match args.replica_of {
-            Some(replica_addr) => Role::ReplicaOf(replica_addr),
+            Some(primary_addr) => Role::ReplicaOf {
+                primary_addr,
+                ack_tx: None,
+            },
             None => Role::Primary,
         }
     };

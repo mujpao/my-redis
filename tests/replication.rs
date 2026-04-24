@@ -164,45 +164,7 @@ async fn replica_can_process_commands() {
     let port = listener.local_addr().unwrap().port();
 
     let handle = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-
-        let mut conn = Connection::new(stream);
-        let ping = conn.read_value().await.unwrap();
-        assert_eq!(
-            ping,
-            Some(RespValue::Array(vec![RespValue::BulkString(String::from(
-                "PING"
-            ),)]))
-        );
-
-        conn.write_value(&RespValue::SimpleString(String::from("PONG")))
-            .await
-            .unwrap();
-
-        // replconf 1
-        let _ = conn.read_value().await.unwrap();
-
-        conn.write_value(&RespValue::SimpleString(String::from("OK")))
-            .await
-            .unwrap();
-
-        // replconf 2
-        let _ = conn.read_value().await.unwrap();
-        conn.write_value(&RespValue::SimpleString(String::from("OK")))
-            .await
-            .unwrap();
-
-        let replication_id = Alphanumeric.sample_string(&mut rand::rng(), 40);
-
-        // psync
-        let _ = conn.read_value().await.unwrap();
-        let data = format!("FULLRESYNC {} 0", replication_id);
-        let response = RespValue::SimpleString(data);
-        conn.write_value(&response).await.unwrap();
-
-        let empty_rdb_file_hex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
-        let rdb_data = hex::decode(empty_rdb_file_hex).unwrap();
-        conn.write_rdb_data(&rdb_data).await.unwrap();
+        let mut conn = handshake_with_client(listener).await;
 
         let command = Command::Set {
             key: "foo".to_string(),
@@ -229,4 +191,83 @@ async fn replica_can_process_commands() {
         .await
         .expect("failed to execute GET");
     assert_eq!(data, "bar");
+}
+
+#[tokio::test]
+async fn client_responds_to_replconf_getack() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let handle = tokio::spawn(async move {
+        let mut conn = handshake_with_client(listener).await;
+
+        let value = RespValue::Array(vec![
+            RespValue::BulkString(String::from("REPLCONF")),
+            RespValue::BulkString(String::from("GETACK")),
+            RespValue::BulkString(String::from("*")),
+        ]);
+
+        conn.write_value(&value).await.unwrap();
+
+        let expected_response = RespValue::Array(vec![
+            RespValue::BulkString(String::from("REPLCONF")),
+            RespValue::BulkString(String::from("ACK")),
+            RespValue::BulkString(String::from("0")),
+        ]);
+
+        let ack_response = conn.read_value().await.unwrap();
+        assert_eq!(ack_response, Some(expected_response));
+
+        conn
+    });
+
+    let _ = setup_replica(port).await;
+
+    sleep(Duration::from_millis(300)).await;
+
+    handle.await.unwrap();
+}
+
+async fn handshake_with_client(listener: TcpListener) -> Connection {
+    let (stream, _) = listener.accept().await.unwrap();
+
+    let mut conn = Connection::new(stream);
+    let ping = conn.read_value().await.unwrap();
+    assert_eq!(
+        ping,
+        Some(RespValue::Array(vec![RespValue::BulkString(String::from(
+            "PING"
+        ),)]))
+    );
+
+    conn.write_value(&RespValue::SimpleString(String::from("PONG")))
+        .await
+        .unwrap();
+
+    // replconf 1
+    let _ = conn.read_value().await.unwrap();
+
+    conn.write_value(&RespValue::SimpleString(String::from("OK")))
+        .await
+        .unwrap();
+
+    // replconf 2
+    let _ = conn.read_value().await.unwrap();
+    conn.write_value(&RespValue::SimpleString(String::from("OK")))
+        .await
+        .unwrap();
+
+    let replication_id = Alphanumeric.sample_string(&mut rand::rng(), 40);
+
+    // psync
+    let _ = conn.read_value().await.unwrap();
+    let data = format!("FULLRESYNC {} 0", replication_id);
+    let response = RespValue::SimpleString(data);
+    conn.write_value(&response).await.unwrap();
+
+    let empty_rdb_file_hex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
+    let rdb_data = hex::decode(empty_rdb_file_hex).unwrap();
+    conn.write_rdb_data(&rdb_data).await.unwrap();
+
+    conn
 }

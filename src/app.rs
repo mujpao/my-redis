@@ -26,7 +26,10 @@ enum RedisDataType {
 #[derive(Debug)]
 pub enum Role {
     Primary,
-    ReplicaOf(SocketAddr),
+    ReplicaOf {
+        primary_addr: SocketAddr,
+        ack_tx: Option<mpsc::Sender<RespValue>>,
+    },
 }
 
 #[derive(Debug)]
@@ -138,17 +141,25 @@ impl App {
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {
-        if let Role::ReplicaOf(primary) = self.role {
-            let conn = perform_handshake_from_replica(primary, self.addr.port()).await?;
+        if let Role::ReplicaOf {
+            primary_addr,
+            ref mut ack_tx,
+        } = self.role
+        {
+            let conn = perform_handshake_from_replica(primary_addr, self.addr.port()).await?;
+
+            // Channel for acks
+            let (tx, rx) = mpsc::channel(100);
+            *ack_tx = Some(tx);
 
             let events_tx = self.events_tx.clone();
             tokio::spawn(
                 async move {
-                    if let Err(e) = listen_for_propagated_commands(conn, events_tx).await {
+                    if let Err(e) = listen_for_propagated_commands(conn, events_tx, rx).await {
                         warn!("error getting propagated command, {}", e);
                     }
                 }
-                .instrument(info_span!("connection to primary", addr = ?primary)),
+                .instrument(info_span!("connection to primary", addr = ?primary_addr)),
             );
         }
 
@@ -246,8 +257,29 @@ impl App {
     }
 
     async fn process_propagated_command(&mut self, command: Command) -> anyhow::Result<()> {
-        self.execute_command(&command).await?;
-        Ok(())
+        let Role::ReplicaOf { ack_tx, .. } = &self.role else {
+            warn!("in process_propagated_command on primary");
+            return Ok(());
+        };
+
+        if let Command::ReplConfGetAck = command {
+            let response = RespValue::Array(vec![
+                RespValue::BulkString(String::from("REPLCONF")),
+                RespValue::BulkString(String::from("ACK")),
+                RespValue::BulkString(String::from("0")),
+            ]);
+
+            ack_tx
+                .as_ref()
+                .ok_or_else(|| anyhow!("ack_tx is None"))?
+                .send(response)
+                .await?;
+
+            Ok(())
+        } else {
+            self.execute_command(&command).await?;
+            Ok(())
+        }
     }
 
     #[instrument(skip(self), fields(role = ?self.role))]
@@ -624,7 +656,7 @@ impl App {
                                     "NULL", 0
                                 )
                             }
-                            (Role::ReplicaOf(_), _) => "role:slave".to_string(),
+                            (Role::ReplicaOf { .. }, _) => "role:slave".to_string(),
                         };
                         info.push_str(&data);
                     }
@@ -680,6 +712,11 @@ impl App {
                     let response = RespValue::SimpleString(data);
                     CommandResponse::NonBlocking(response)
                 }
+            }
+            Command::ReplConfGetAck => {
+                warn!("got ReplConfGetAck on primary");
+
+                CommandResponse::NonBlocking(RespValue::NullBulkString)
             }
         };
 
@@ -949,18 +986,26 @@ async fn send_command_from_replica(
 async fn listen_for_propagated_commands(
     mut conn: Connection,
     events_tx: mpsc::Sender<AppEvent>,
+    mut ack_rx: mpsc::Receiver<RespValue>,
 ) -> anyhow::Result<()> {
     info!("starting to listen for propagated commands");
     loop {
-        let command = conn
-            .read_value()
-            .await?
-            .ok_or_else(|| anyhow!("no value read from connection"))?
-            .try_into()
-            .map_err(|e| anyhow!("{}", e))?;
+        select![
+            maybe_command = conn.read_value() => {
+                let command = maybe_command?
+                    .ok_or_else(|| anyhow!("no value read from connection"))?
+                    .try_into()
+                    .map_err(|e| anyhow!("{}", e))?;
 
-        let _ = events_tx
-            .send(AppEvent::GotPropagatedCommand { command })
-            .await;
+                let _ = events_tx
+                    .send(AppEvent::GotPropagatedCommand { command })
+                    .await;
+            }
+            maybe_ack_value = ack_rx.recv() => {
+                info!("received replconf getack from primary");
+
+                conn.write_value(&maybe_ack_value.ok_or_else(|| anyhow!("ack channel closed"))?).await?;
+            }
+        ];
     }
 }
