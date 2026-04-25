@@ -202,18 +202,43 @@ async fn client_responds_to_replconf_getack() {
     let handle = tokio::spawn(async move {
         let mut conn = handshake_with_client(listener).await;
 
-        let value = RespValue::Array(vec![
+        let get_ack_resp_value = RespValue::Array(vec![
             RespValue::BulkString(String::from("REPLCONF")),
             RespValue::BulkString(String::from("GETACK")),
             RespValue::BulkString(String::from("*")),
         ]);
 
-        conn.write_value(&value).await.unwrap();
+        conn.write_value(&get_ack_resp_value).await.unwrap();
 
         let expected_response = RespValue::Array(vec![
             RespValue::BulkString(String::from("REPLCONF")),
             RespValue::BulkString(String::from("ACK")),
             RespValue::BulkString(String::from("0")),
+        ]);
+
+        let ack_response = conn.read_value().await.unwrap();
+        assert_eq!(ack_response, Some(expected_response));
+
+        conn.write_value(&get_ack_resp_value).await.unwrap();
+
+        let expected_response = RespValue::Array(vec![
+            RespValue::BulkString(String::from("REPLCONF")),
+            RespValue::BulkString(String::from("ACK")),
+            RespValue::BulkString(String::from("37")),
+        ]);
+
+        let ack_response = conn.read_value().await.unwrap();
+        assert_eq!(ack_response, Some(expected_response));
+
+        let ping: RespValue = Command::Ping.try_into().unwrap();
+        conn.write_value(&ping).await.unwrap();
+
+        conn.write_value(&get_ack_resp_value).await.unwrap();
+
+        let expected_response = RespValue::Array(vec![
+            RespValue::BulkString(String::from("REPLCONF")),
+            RespValue::BulkString(String::from("ACK")),
+            RespValue::BulkString(String::from("88")),
         ]);
 
         let ack_response = conn.read_value().await.unwrap();

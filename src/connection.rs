@@ -40,9 +40,15 @@ impl Connection {
     }
 
     pub async fn read_value<T: Frame>(&mut self) -> anyhow::Result<Option<T>> {
+        self.read_value_count_bytes()
+            .await
+            .map(|res| res.map(|(frame, _)| frame))
+    }
+
+    pub async fn read_value_count_bytes<T: Frame>(&mut self) -> anyhow::Result<Option<(T, usize)>> {
         loop {
-            if let Some(frame) = self.parse_frame::<T>()? {
-                return Ok(Some(frame));
+            if let Some(value) = self.parse_frame::<T>()? {
+                return Ok(Some(value));
             }
 
             if 0 == self.stream.read_buf(&mut self.buffer).await? {
@@ -55,7 +61,7 @@ impl Connection {
         }
     }
 
-    fn parse_frame<T: Frame>(&mut self) -> anyhow::Result<Option<T>> {
+    fn parse_frame<T: Frame>(&mut self) -> anyhow::Result<Option<(T, usize)>> {
         let mut buf = Cursor::new(&self.buffer[..]);
 
         match T::check(&mut buf) {
@@ -65,7 +71,7 @@ impl Connection {
                 let frame = T::parse(&mut buf)?;
                 self.buffer.advance(len);
 
-                Ok(Some(frame))
+                Ok(Some((frame, len)))
             }
             Err(ParseError::Incomplete) => Ok(None),
             Err(ParseError::Other(e)) => Err(anyhow!("failed to parse: {:?}", e)),

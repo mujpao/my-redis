@@ -30,16 +30,7 @@ pub async fn setup_replica(primary_port: u16) -> MultiplexedConnection {
     let replica_port = listener.local_addr().unwrap().port();
 
     let primary_addr = format!("127.0.0.1:{}", primary_port).parse().unwrap();
-    tokio::spawn(async move {
-        run(
-            listener,
-            Role::ReplicaOf {
-                primary_addr,
-                ack_tx: None,
-            },
-        )
-        .await
-    });
+    tokio::spawn(async move { run(listener, Role::Replica { primary_addr }).await });
 
     let client = redis::Client::open(format!("redis://127.0.0.1:{}/", replica_port)).unwrap();
     client.get_multiplexed_async_connection().await.unwrap()
