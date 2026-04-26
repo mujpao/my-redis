@@ -691,7 +691,11 @@ impl App {
 
                 CommandResponse::NonBlocking(RespValue::NullBulkString)
             }
-            Command::Wait { .. } => CommandResponse::NonBlocking(RespValue::Integer(0)),
+            Command::Wait { .. } => {
+                let num_replicas = self.replica_connections.len();
+
+                CommandResponse::NonBlocking(RespValue::Integer(num_replicas as i64))
+            }
         };
 
         Ok(result)

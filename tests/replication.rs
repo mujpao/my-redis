@@ -92,14 +92,11 @@ async fn primary_responds_to_replication_handshake() {
 
         let response = conn.read_value().await.unwrap();
 
-        match response {
-            Some(RespValue::SimpleString(s)) => {
-                assert!(s.contains("FULLRESYNC"));
-            }
-            _ => {
-                assert!(false);
-            }
-        }
+        let Some(RespValue::SimpleString(s)) = response else {
+            panic!();
+        };
+
+        assert!(s.contains("FULLRESYNC"));
 
         let empty_rdb_file_hex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
         let rdb_data = hex::decode(empty_rdb_file_hex).unwrap();
@@ -268,6 +265,44 @@ async fn wait_command_works_with_zero_replicas() {
         .await
         .unwrap();
     assert_eq!(data, 0);
+}
+
+#[tokio::test]
+async fn wait_with_no_commands_returns_number_of_connected_replicas() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    for _ in 0..7 {
+        setup_replica(port).await;
+    }
+
+    sleep(Duration::from_millis(300)).await;
+
+    let data: i64 = redis::cmd("WAIT")
+        .arg("3")
+        .arg("500")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, 7);
+
+    let data: i64 = redis::cmd("WAIT")
+        .arg("7")
+        .arg("500")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, 7);
+
+    let data: i64 = redis::cmd("WAIT")
+        .arg("9")
+        .arg("500")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, 7);
 }
 
 async fn handshake_with_client(listener: TcpListener) -> Connection {

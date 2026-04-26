@@ -2009,7 +2009,7 @@ async fn can_parse_frames_from_same_tcp_read() {
             .unwrap();
 
         let resync = "+FULLRESYNC 75cd7bc10c49047e0d163660f3b90625b1af31dc 0\r\n".as_bytes();
-        stream.write_all(&resync).await.unwrap();
+        stream.write_all(resync).await.unwrap();
 
         let start = "$".as_bytes();
         let newline = "\r\n".as_bytes();
@@ -2023,7 +2023,7 @@ async fn can_parse_frames_from_same_tcp_read() {
         stream.write_all(&rdb_data).await.unwrap();
 
         let set = "*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$7\r\nmyvalue\r\n".as_bytes();
-        stream.write_all(&set).await.unwrap();
+        stream.write_all(set).await.unwrap();
 
         stream.flush().await.unwrap();
         stream
