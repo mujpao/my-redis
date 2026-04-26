@@ -8,6 +8,7 @@ use rand::distr::SampleString;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 mod common;
@@ -303,6 +304,164 @@ async fn wait_with_no_commands_returns_number_of_connected_replicas() {
         .await
         .unwrap();
     assert_eq!(data, 7);
+}
+
+#[tokio::test]
+async fn wait_works_with_propagated_commands() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let mut replicas = Vec::new();
+
+    for _ in 0..7 {
+        replicas.push(FakeReplica::new(port).await);
+    }
+
+    sleep(Duration::from_millis(300)).await;
+
+    let data: String = redis::cmd("SET")
+        .arg("foo")
+        .arg("bar")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "OK");
+
+    let data: i64 = redis::cmd("WAIT")
+        .arg("3")
+        .arg("50")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, 0);
+
+    let data: String = redis::cmd("SET")
+        .arg("foo2")
+        .arg("bar2")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "OK");
+
+    let replicas_cloned = replicas.clone();
+    let handle = tokio::spawn(async move {
+        sleep(Duration::from_millis(100)).await;
+
+        for mut replica in replicas_cloned {
+            replica.send_ack().await;
+        }
+    });
+
+    let data: i64 = redis::cmd("WAIT")
+        .arg("7")
+        .arg("500")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, 7);
+
+    handle.await.unwrap();
+
+    let data: String = redis::cmd("SET")
+        .arg("foo")
+        .arg("bar2")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "OK");
+
+    let mut replicas_cloned = replicas.clone();
+    let handle = tokio::spawn(async move {
+        sleep(Duration::from_millis(100)).await;
+        replicas_cloned[0].send_ack().await;
+        replicas_cloned[1].send_ack().await;
+        replicas_cloned[2].send_ack().await;
+    });
+
+    let data: i64 = redis::cmd("WAIT")
+        .arg("3")
+        .arg("500")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, 3);
+
+    handle.await.unwrap();
+
+    let data: String = redis::cmd("SET")
+        .arg("foo")
+        .arg("bar3")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "OK");
+
+    let mut replicas_cloned = replicas.clone();
+    let handle = tokio::spawn(async move {
+        sleep(Duration::from_millis(100)).await;
+        replicas_cloned[0].send_ack().await;
+        replicas_cloned[1].send_ack().await;
+        replicas_cloned[2].send_ack().await;
+        replicas_cloned[3].send_ack().await;
+    });
+
+    let data: i64 = redis::cmd("WAIT")
+        .arg("7")
+        .arg("300")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, 4);
+
+    handle.await.unwrap();
+
+    let data: i64 = redis::cmd("WAIT")
+        .arg("9")
+        .arg("100")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, 0);
+}
+
+#[derive(Clone)]
+struct FakeReplica {
+    tx: mpsc::Sender<usize>,
+}
+
+impl FakeReplica {
+    async fn new(primary_port: u16) -> Self {
+        let stream = TcpStream::connect(format!("127.0.0.1:{}", primary_port))
+            .await
+            .unwrap();
+        let mut conn = Connection::new(stream);
+
+        let (tx, mut rx) = mpsc::channel(10);
+
+        tokio::spawn(async move {
+            loop {
+                let bytes: usize = rx.recv().await.unwrap();
+
+                let value = RespValue::Array(vec![
+                    RespValue::BulkString(String::from("REPLCONF")),
+                    RespValue::BulkString(String::from("ACK")),
+                    RespValue::BulkString(bytes.to_string()),
+                ]);
+
+                conn.write_value(&value).await.unwrap();
+            }
+        });
+
+        Self { tx }
+    }
+
+    async fn send_ack(&mut self) {
+        let bytes = 0;
+
+        self.tx.send(bytes).await.unwrap()
+    }
 }
 
 async fn handshake_with_client(listener: TcpListener) -> Connection {

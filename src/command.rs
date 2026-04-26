@@ -97,7 +97,8 @@ impl Command {
             | Command::Type { .. }
             | Command::Info { .. }
             | Command::ReplConf { .. }
-            | Command::PSync { .. } => false,
+            | Command::PSync { .. }
+            | Command::Wait { .. } => false,
             // TODO what about multi, exec, etc...
             _ => true,
         }
