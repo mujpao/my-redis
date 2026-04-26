@@ -691,6 +691,7 @@ impl App {
 
                 CommandResponse::NonBlocking(RespValue::NullBulkString)
             }
+            Command::Wait { .. } => CommandResponse::NonBlocking(RespValue::Integer(0)),
         };
 
         Ok(result)

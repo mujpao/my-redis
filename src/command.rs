@@ -80,6 +80,10 @@ pub enum Command {
         replica_addr: Option<SocketAddr>,
     },
     ReplConfGetAck,
+    Wait {
+        num_replicas: usize,
+        timeout: Duration,
+    },
 }
 
 impl Command {
@@ -126,537 +130,566 @@ impl TryFrom<RespValue> for Command {
 
     #[instrument]
     fn try_from(resp_value: RespValue) -> Result<Self, Self::Error> {
-        if let RespValue::Array(ref data) = resp_value {
-            if data.is_empty() {
-                return Err(ParseCommandError::InvalidCommandName);
+        let RespValue::Array(ref data) = resp_value else {
+            let e = ParseCommandError::InvalidRespData;
+            info!(reason = %e, ?resp_value, "invalid command");
+            return Err(e);
+        };
+
+        if data.is_empty() {
+            return Err(ParseCommandError::InvalidCommandName);
+        }
+
+        let RespValue::BulkString(command_name) = &data[0] else {
+            let e = ParseCommandError::InvalidCommandName;
+            info!(reason = %e, ?resp_value, "invalid command");
+            return Err(e);
+        };
+
+        match command_name.as_str().to_uppercase().as_str() {
+            "PING" => Ok(Command::Ping),
+            "ECHO" => {
+                if data.len() < 2 {
+                    let e = ParseCommandError::WrongNumberArguments;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                }
+
+                if let RespValue::BulkString(message) = &data[1] {
+                    Ok(Command::Echo(message.into()))
+                } else {
+                    let e = ParseCommandError::InvalidArgument;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    Err(e)
+                }
             }
-
-            if let RespValue::BulkString(command_name) = &data[0] {
-                match command_name.as_str().to_uppercase().as_str() {
-                    "PING" => Ok(Command::Ping),
-                    "ECHO" => {
-                        if data.len() < 2 {
-                            let e = ParseCommandError::WrongNumberArguments;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
-                        }
-
-                        if let RespValue::BulkString(message) = &data[1] {
-                            Ok(Command::Echo(message.into()))
-                        } else {
-                            let e = ParseCommandError::InvalidArgument;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            Err(e)
-                        }
+            "SET" => {
+                if data.len() < 3 {
+                    let e = ParseCommandError::WrongNumberArguments;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                }
+                let mut command = match (&data[1], &data[2]) {
+                    (RespValue::BulkString(key), RespValue::BulkString(value)) => Command::Set {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                        expiry_duration: None,
+                    },
+                    (_, _) => {
+                        let e = ParseCommandError::InvalidArgument;
+                        info!(reason = %e, ?resp_value, "invalid command");
+                        return Err(e);
                     }
-                    "SET" => {
-                        if data.len() < 3 {
-                            let e = ParseCommandError::WrongNumberArguments;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
-                        }
-                        let mut command = match (&data[1], &data[2]) {
-                            (RespValue::BulkString(key), RespValue::BulkString(value)) => {
-                                Command::Set {
-                                    key: key.to_string(),
-                                    value: value.to_string(),
-                                    expiry_duration: None,
-                                }
-                            }
-                            (_, _) => {
-                                let e = ParseCommandError::InvalidArgument;
-                                info!(reason = %e, ?resp_value, "invalid command");
-                                return Err(e);
-                            }
-                        };
+                };
 
-                        if data.len() == 5 {
-                            match (&data[3], &data[4]) {
-                                (RespValue::BulkString(s), RespValue::BulkString(i)) => {
-                                    let i: u64 = i.parse().map_err(|e| {
+                if data.len() == 5 {
+                    match (&data[3], &data[4]) {
+                        (RespValue::BulkString(s), RespValue::BulkString(i)) => {
+                            let i: u64 = i.parse().map_err(|e| {
                                             let e2 = ParseCommandError::InvalidArgument;
                                 info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
                                             e2
                                         })?;
 
-                                    let units = s.as_str().to_uppercase();
-                                    let duration = match units.as_str() {
-                                        "EX" => Duration::from_secs(i),
-                                        "PX" => Duration::from_millis(i),
-                                        d => {
-                                            let e = ParseCommandError::InvalidArgument;
-                                            info!(reason = %e, ?resp_value, unit=d, "invalid duration unit");
-                                            return Err(e);
-                                        }
-                                    };
-
-                                    command = if let Command::Set { key, value, .. } = command {
-                                        Command::Set {
-                                            key,
-                                            value,
-                                            expiry_duration: Some(duration),
-                                        }
-                                    } else {
-                                        let e = ParseCommandError::InvalidArgument;
-                                        info!(reason = %e, ?resp_value, "invalid command");
-                                        return Err(e);
-                                    };
+                            let units = s.as_str().to_uppercase();
+                            let duration = match units.as_str() {
+                                "EX" => Duration::from_secs(i),
+                                "PX" => Duration::from_millis(i),
+                                d => {
+                                    let e = ParseCommandError::InvalidArgument;
+                                    info!(reason = %e, ?resp_value, unit=d, "invalid duration unit");
+                                    return Err(e);
                                 }
-                                (_, _) => {
+                            };
+
+                            command = if let Command::Set { key, value, .. } = command {
+                                Command::Set {
+                                    key,
+                                    value,
+                                    expiry_duration: Some(duration),
+                                }
+                            } else {
+                                let e = ParseCommandError::InvalidArgument;
+                                info!(reason = %e, ?resp_value, "invalid command");
+                                return Err(e);
+                            };
+                        }
+                        (_, _) => {
+                            let e = ParseCommandError::InvalidArgument;
+                            info!(reason = %e, ?resp_value, "invalid command");
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(command)
+            }
+            "GET" => {
+                if data.len() < 2 {
+                    let e = ParseCommandError::WrongNumberArguments;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                }
+                match &data[1] {
+                    RespValue::BulkString(key) => Ok(Command::Get {
+                        key: key.to_string(),
+                    }),
+                    _ => {
+                        let e = ParseCommandError::InvalidArgument;
+                        info!(reason = %e, ?resp_value, "invalid command");
+                        Err(e)
+                    }
+                }
+            }
+            "RPUSH" => {
+                if data.len() < 3 {
+                    let e = ParseCommandError::WrongNumberArguments;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                }
+
+                match &data[1] {
+                    RespValue::BulkString(key) => Ok(Command::RPush {
+                        key: key.to_string(),
+                        elements: data[2..].to_vec(),
+                    }),
+                    _ => {
+                        let e = ParseCommandError::InvalidArgument;
+                        info!(reason = %e, ?resp_value, "invalid command");
+                        Err(e)
+                    }
+                }
+            }
+            "LPUSH" => {
+                if data.len() < 3 {
+                    let e = ParseCommandError::WrongNumberArguments;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                }
+
+                match &data[1] {
+                    RespValue::BulkString(key) => Ok(Command::LPush {
+                        key: key.to_string(),
+                        elements: data[2..].to_vec(),
+                    }),
+                    _ => {
+                        let e = ParseCommandError::InvalidArgument;
+                        info!(reason = %e, ?resp_value, "invalid command");
+                        Err(e)
+                    }
+                }
+            }
+            "LRANGE" => {
+                if data.len() != 4 {
+                    let e = ParseCommandError::WrongNumberArguments;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                }
+
+                match (&data[1], &data[2], &data[3]) {
+                    (
+                        RespValue::BulkString(key),
+                        RespValue::BulkString(start),
+                        RespValue::BulkString(stop),
+                    ) => {
+                        let start: i64 = start.parse().map_err(|e| {
+                                        let e2 = ParseCommandError::InvalidArgument;
+                                info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
+                                            e2
+                                    })?;
+
+                        let stop: i64 = stop.parse().map_err(|e| {
+                                        let e2 = ParseCommandError::InvalidArgument;
+                                info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
+                                            e2
+                                    })?;
+
+                        Ok(Command::LRange {
+                            key: key.to_string(),
+                            start,
+                            stop,
+                        })
+                    }
+                    _ => {
+                        let e = ParseCommandError::InvalidArgument;
+                        info!(reason = %e, ?resp_value, "invalid command");
+                        Err(e)
+                    }
+                }
+            }
+            "LLEN" => {
+                if data.len() != 2 {
+                    let e = ParseCommandError::WrongNumberArguments;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                }
+                match &data[1] {
+                    RespValue::BulkString(key) => Ok(Command::LLen {
+                        key: key.to_string(),
+                    }),
+                    _ => {
+                        let e = ParseCommandError::InvalidArgument;
+                        info!(reason = %e, ?resp_value, "invalid command");
+                        Err(e)
+                    }
+                }
+            }
+            "LPOP" => {
+                if data.len() < 2 {
+                    let e = ParseCommandError::WrongNumberArguments;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                }
+
+                let count = if data.len() > 2 {
+                    match &data[2] {
+                        RespValue::BulkString(s) => {
+                            let count: usize = s.parse().map_err(|e| {
+                                            let e2 = ParseCommandError::InvalidArgument;
+                                info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
+                                            e2
+                                        })?;
+
+                            Some(count)
+                        }
+                        _ => return Err(ParseCommandError::WrongNumberArguments),
+                    }
+                } else {
+                    None
+                };
+
+                match &data[1] {
+                    RespValue::BulkString(key) => Ok(Command::LPop {
+                        key: key.to_string(),
+                        count,
+                    }),
+                    _ => {
+                        let e = ParseCommandError::InvalidArgument;
+                        info!(reason = %e, ?resp_value, "invalid command");
+                        Err(e)
+                    }
+                }
+            }
+            "BLPOP" => {
+                if data.len() != 3 {
+                    let e = ParseCommandError::WrongNumberArguments;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                }
+                match (&data[1], &data[2]) {
+                    (RespValue::BulkString(key), RespValue::BulkString(s)) => {
+                        let timeout: f64 = s.parse().map_err(|e| {
+                                       let e2 = ParseCommandError::InvalidArgument;
+                                info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
+                                            e2
+                                    })?;
+
+                        let timeout = if timeout < 0.0 {
+                            return Err(ParseCommandError::InvalidArgument);
+                        } else if timeout == 0.0 {
+                            None
+                        } else {
+                            Some(timeout)
+                        };
+
+                        Ok(Command::BLPop {
+                            key: key.to_string(),
+                            timeout,
+                        })
+                    }
+
+                    _ => {
+                        let e = ParseCommandError::InvalidArgument;
+                        info!(reason = %e, ?resp_value, "invalid command");
+                        Err(e)
+                    }
+                }
+            }
+            "TYPE" => {
+                if data.len() < 2 {
+                    let e = ParseCommandError::WrongNumberArguments;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                }
+                match &data[1] {
+                    RespValue::BulkString(key) => Ok(Command::Type {
+                        key: key.to_string(),
+                    }),
+                    _ => {
+                        let e = ParseCommandError::InvalidArgument;
+                        info!(reason = %e, ?resp_value, "invalid command");
+                        Err(e)
+                    }
+                }
+            }
+            "XADD" => {
+                if data.len() < 5 {
+                    let e = ParseCommandError::WrongNumberArguments;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                }
+                match (&data[1], &data[2]) {
+                    (RespValue::BulkString(key), RespValue::BulkString(id)) => {
+                        let mut pairs = Vec::new();
+                        let mut field_idx = 3;
+                        let mut value_idx = field_idx + 1;
+                        while value_idx < data.len() {
+                            match (&data[field_idx], &data[value_idx]) {
+                                (RespValue::BulkString(field), RespValue::BulkString(value)) => {
+                                    pairs.push((field.to_string(), value.to_string()));
+                                    field_idx += 2;
+                                    value_idx = field_idx + 1;
+                                }
+                                _ => {
                                     let e = ParseCommandError::InvalidArgument;
                                     info!(reason = %e, ?resp_value, "invalid command");
                                     return Err(e);
                                 }
                             }
                         }
-                        Ok(command)
+                        Ok(Command::XAdd {
+                            key: key.to_string(),
+                            id: id.to_string(),
+                            pairs,
+                        })
                     }
-                    "GET" => {
-                        if data.len() < 2 {
-                            let e = ParseCommandError::WrongNumberArguments;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
-                        }
-                        match &data[1] {
-                            RespValue::BulkString(key) => Ok(Command::Get {
-                                key: key.to_string(),
-                            }),
-                            _ => {
-                                let e = ParseCommandError::InvalidArgument;
+                    _ => {
+                        let e = ParseCommandError::InvalidArgument;
+                        info!(reason = %e, ?resp_value, "invalid command");
+                        Err(e)
+                    }
+                }
+            }
+            "XRANGE" => {
+                if data.len() != 4 {
+                    let e = ParseCommandError::WrongNumberArguments;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                }
+                match (&data[1], &data[2], &data[3]) {
+                    (
+                        RespValue::BulkString(key),
+                        RespValue::BulkString(start),
+                        RespValue::BulkString(end),
+                    ) => Ok(Command::XRange {
+                        key: key.to_string(),
+                        start: start.to_string(),
+                        end: end.to_string(),
+                    }),
+                    _ => {
+                        let e = ParseCommandError::InvalidArgument;
+                        info!(reason = %e, ?resp_value, "invalid command");
+                        Err(e)
+                    }
+                }
+            }
+            "XREAD" => {
+                if data.len() < 4 {
+                    let e = ParseCommandError::WrongNumberArguments;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                }
+
+                let (timeout, pairs_start_idx) = match &data[1] {
+                    RespValue::BulkString(s) => match s.as_str().to_uppercase().as_str() {
+                        "STREAMS" => (None, 2),
+                        "BLOCK" => {
+                            if data.len() < 6 {
+                                let e = ParseCommandError::WrongNumberArguments;
                                 info!(reason = %e, ?resp_value, "invalid command");
-                                Err(e)
-                            }
-                        }
-                    }
-                    "RPUSH" => {
-                        if data.len() < 3 {
-                            let e = ParseCommandError::WrongNumberArguments;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
-                        }
-
-                        match &data[1] {
-                            RespValue::BulkString(key) => Ok(Command::RPush {
-                                key: key.to_string(),
-                                elements: data[2..].to_vec(),
-                            }),
-                            _ => {
-                                let e = ParseCommandError::InvalidArgument;
-                                info!(reason = %e, ?resp_value, "invalid command");
-                                Err(e)
-                            }
-                        }
-                    }
-                    "LPUSH" => {
-                        if data.len() < 3 {
-                            let e = ParseCommandError::WrongNumberArguments;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
-                        }
-
-                        match &data[1] {
-                            RespValue::BulkString(key) => Ok(Command::LPush {
-                                key: key.to_string(),
-                                elements: data[2..].to_vec(),
-                            }),
-                            _ => {
-                                let e = ParseCommandError::InvalidArgument;
-                                info!(reason = %e, ?resp_value, "invalid command");
-                                Err(e)
-                            }
-                        }
-                    }
-                    "LRANGE" => {
-                        if data.len() != 4 {
-                            let e = ParseCommandError::WrongNumberArguments;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
-                        }
-
-                        match (&data[1], &data[2], &data[3]) {
-                            (
-                                RespValue::BulkString(key),
-                                RespValue::BulkString(start),
-                                RespValue::BulkString(stop),
-                            ) => {
-                                let start: i64 = start.parse().map_err(|e| {
-                                        let e2 = ParseCommandError::InvalidArgument;
-                                info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
-                                            e2
-                                    })?;
-
-                                let stop: i64 = stop.parse().map_err(|e| {
-                                        let e2 = ParseCommandError::InvalidArgument;
-                                info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
-                                            e2
-                                    })?;
-
-                                Ok(Command::LRange {
-                                    key: key.to_string(),
-                                    start,
-                                    stop,
-                                })
-                            }
-                            _ => {
-                                let e = ParseCommandError::InvalidArgument;
-                                info!(reason = %e, ?resp_value, "invalid command");
-                                Err(e)
-                            }
-                        }
-                    }
-                    "LLEN" => {
-                        if data.len() != 2 {
-                            let e = ParseCommandError::WrongNumberArguments;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
-                        }
-                        match &data[1] {
-                            RespValue::BulkString(key) => Ok(Command::LLen {
-                                key: key.to_string(),
-                            }),
-                            _ => {
-                                let e = ParseCommandError::InvalidArgument;
-                                info!(reason = %e, ?resp_value, "invalid command");
-                                Err(e)
-                            }
-                        }
-                    }
-                    "LPOP" => {
-                        if data.len() < 2 {
-                            let e = ParseCommandError::WrongNumberArguments;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
-                        }
-
-                        let count = if data.len() > 2 {
-                            match &data[2] {
-                                RespValue::BulkString(s) => {
-                                    let count: usize = s.parse().map_err(|e| {
-                                            let e2 = ParseCommandError::InvalidArgument;
-                                info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
-                                            e2
-                                        })?;
-
-                                    Some(count)
-                                }
-                                _ => return Err(ParseCommandError::WrongNumberArguments),
-                            }
-                        } else {
-                            None
-                        };
-
-                        match &data[1] {
-                            RespValue::BulkString(key) => Ok(Command::LPop {
-                                key: key.to_string(),
-                                count,
-                            }),
-                            _ => {
-                                let e = ParseCommandError::InvalidArgument;
-                                info!(reason = %e, ?resp_value, "invalid command");
-                                Err(e)
-                            }
-                        }
-                    }
-                    "BLPOP" => {
-                        if data.len() != 3 {
-                            let e = ParseCommandError::WrongNumberArguments;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
-                        }
-                        match (&data[1], &data[2]) {
-                            (RespValue::BulkString(key), RespValue::BulkString(s)) => {
-                                let timeout: f64 = s.parse().map_err(|e| {
-                                       let e2 = ParseCommandError::InvalidArgument;
-                                info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
-                                            e2
-                                    })?;
-
-                                let timeout = if timeout < 0.0 {
-                                    return Err(ParseCommandError::InvalidArgument);
-                                } else if timeout == 0.0 {
-                                    None
-                                } else {
-                                    Some(timeout)
-                                };
-
-                                Ok(Command::BLPop {
-                                    key: key.to_string(),
-                                    timeout,
-                                })
+                                return Err(e);
                             }
 
-                            _ => {
-                                let e = ParseCommandError::InvalidArgument;
-                                info!(reason = %e, ?resp_value, "invalid command");
-                                Err(e)
-                            }
-                        }
-                    }
-                    "TYPE" => {
-                        if data.len() < 2 {
-                            let e = ParseCommandError::WrongNumberArguments;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
-                        }
-                        match &data[1] {
-                            RespValue::BulkString(key) => Ok(Command::Type {
-                                key: key.to_string(),
-                            }),
-                            _ => {
-                                let e = ParseCommandError::InvalidArgument;
-                                info!(reason = %e, ?resp_value, "invalid command");
-                                Err(e)
-                            }
-                        }
-                    }
-                    "XADD" => {
-                        if data.len() < 5 {
-                            let e = ParseCommandError::WrongNumberArguments;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
-                        }
-                        match (&data[1], &data[2]) {
-                            (RespValue::BulkString(key), RespValue::BulkString(id)) => {
-                                let mut pairs = Vec::new();
-                                let mut field_idx = 3;
-                                let mut value_idx = field_idx + 1;
-                                while value_idx < data.len() {
-                                    match (&data[field_idx], &data[value_idx]) {
-                                        (
-                                            RespValue::BulkString(field),
-                                            RespValue::BulkString(value),
-                                        ) => {
-                                            pairs.push((field.to_string(), value.to_string()));
-                                            field_idx += 2;
-                                            value_idx = field_idx + 1;
-                                        }
-                                        _ => {
-                                            let e = ParseCommandError::InvalidArgument;
-                                            info!(reason = %e, ?resp_value, "invalid command");
-                                            return Err(e);
-                                        }
-                                    }
-                                }
-                                Ok(Command::XAdd {
-                                    key: key.to_string(),
-                                    id: id.to_string(),
-                                    pairs,
-                                })
-                            }
-                            _ => {
-                                let e = ParseCommandError::InvalidArgument;
-                                info!(reason = %e, ?resp_value, "invalid command");
-                                Err(e)
-                            }
-                        }
-                    }
-                    "XRANGE" => {
-                        if data.len() != 4 {
-                            let e = ParseCommandError::WrongNumberArguments;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
-                        }
-                        match (&data[1], &data[2], &data[3]) {
-                            (
-                                RespValue::BulkString(key),
-                                RespValue::BulkString(start),
-                                RespValue::BulkString(end),
-                            ) => Ok(Command::XRange {
-                                key: key.to_string(),
-                                start: start.to_string(),
-                                end: end.to_string(),
-                            }),
-                            _ => {
-                                let e = ParseCommandError::InvalidArgument;
-                                info!(reason = %e, ?resp_value, "invalid command");
-                                Err(e)
-                            }
-                        }
-                    }
-                    "XREAD" => {
-                        if data.len() < 4 {
-                            let e = ParseCommandError::WrongNumberArguments;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
-                        }
-
-                        let (timeout, pairs_start_idx) = match &data[1] {
-                            RespValue::BulkString(s) => match s.as_str().to_uppercase().as_str() {
-                                "STREAMS" => (None, 2),
-                                "BLOCK" => {
-                                    if data.len() < 6 {
-                                        let e = ParseCommandError::WrongNumberArguments;
-                                        info!(reason = %e, ?resp_value, "invalid command");
-                                        return Err(e);
-                                    }
-
-                                    if let RespValue::BulkString(timeout) = &data[2] {
-                                        let timeout: u64 =
+                            if let RespValue::BulkString(timeout) = &data[2] {
+                                let timeout: u64 =
                                                     timeout.parse().map_err(|e| {
                                                         let e2 = ParseCommandError::InvalidArgument;
                                 info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
                                             e2
                                                     })?;
 
-                                        (Some(timeout), 4)
-                                    } else {
-                                        let e = ParseCommandError::InvalidArgument;
-                                        info!(reason = %e, ?resp_value, "invalid command");
-                                        return Err(e);
-                                    }
-                                }
-                                _ => {
-                                    let e = ParseCommandError::InvalidArgument;
-                                    info!(reason = %e, ?resp_value, "invalid command");
-                                    return Err(e);
-                                }
-                            },
-                            _ => {
+                                (Some(timeout), 4)
+                            } else {
                                 let e = ParseCommandError::InvalidArgument;
                                 info!(reason = %e, ?resp_value, "invalid command");
                                 return Err(e);
                             }
-                        };
-
-                        if (data.len() - 2) % 2 != 0 {
-                            let e = ParseCommandError::WrongNumberArguments;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
                         }
-
-                        let mut pairs = vec![];
-                        let num_pairs = (data.len() - pairs_start_idx) / 2;
-                        for i in 0..num_pairs {
-                            match (
-                                &data[pairs_start_idx + i],
-                                &data[pairs_start_idx + i + num_pairs],
-                            ) {
-                                (RespValue::BulkString(key), RespValue::BulkString(id)) => {
-                                    pairs.push((key.to_string(), id.to_string()))
-                                }
-                                _ => {
-                                    let e = ParseCommandError::InvalidArgument;
-                                    info!(reason = %e, ?resp_value, "invalid command");
-                                    return Err(e);
-                                }
-                            }
-                        }
-
-                        Ok(Command::XRead {
-                            keys_and_ids: pairs,
-                            timeout,
-                        })
-                    }
-                    "INCR" => {
-                        if data.len() != 2 {
-                            let e = ParseCommandError::WrongNumberArguments;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
-                        }
-                        match &data[1] {
-                            RespValue::BulkString(key) => Ok(Command::Incr {
-                                key: key.to_string(),
-                            }),
-                            _ => {
-                                let e = ParseCommandError::InvalidArgument;
-                                info!(reason = %e, ?resp_value, "invalid command");
-                                Err(e)
-                            }
-                        }
-                    }
-                    "MULTI" => Ok(Command::Multi),
-                    "EXEC" => Ok(Command::Exec),
-                    "DISCARD" => Ok(Command::Discard),
-                    "INFO" => {
-                        let mut categories = Vec::new();
-                        for category in &data[1..] {
-                            match category {
-                                RespValue::BulkString(category) => {
-                                    categories.push(category.clone());
-                                }
-                                _ => {
-                                    let e = ParseCommandError::InvalidArgument;
-                                    info!(reason = %e, ?resp_value, "invalid command");
-                                    return Err(e);
-                                }
-                            }
-                        }
-                        Ok(Command::Info { categories })
-                    }
-                    "REPLCONF" => {
-                        if data.len() != 3 {
-                            let e = ParseCommandError::WrongNumberArguments;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
-                        }
-
-                        let RespValue::BulkString(arg) = &data[1] else {
+                        _ => {
                             let e = ParseCommandError::InvalidArgument;
                             info!(reason = %e, ?resp_value, "invalid command");
                             return Err(e);
-                        };
-
-                        match arg.to_lowercase().as_str() {
-                            "listening-port" | "capa" => Ok(Command::ReplConf {
-                                replica_addr: None,
-                                tx: None,
-                            }),
-                            "getack" => Ok(Command::ReplConfGetAck),
-                            _ => {
-                                let e = ParseCommandError::InvalidArgument;
-                                info!(reason = %e, ?resp_value, "invalid command");
-                                Err(e)
-                            }
                         }
+                    },
+                    _ => {
+                        let e = ParseCommandError::InvalidArgument;
+                        info!(reason = %e, ?resp_value, "invalid command");
+                        return Err(e);
                     }
-                    "PSYNC" => {
-                        if data.len() != 3 {
-                            let e = ParseCommandError::WrongNumberArguments;
+                };
+
+                if (data.len() - 2) % 2 != 0 {
+                    let e = ParseCommandError::WrongNumberArguments;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                }
+
+                let mut pairs = vec![];
+                let num_pairs = (data.len() - pairs_start_idx) / 2;
+                for i in 0..num_pairs {
+                    match (
+                        &data[pairs_start_idx + i],
+                        &data[pairs_start_idx + i + num_pairs],
+                    ) {
+                        (RespValue::BulkString(key), RespValue::BulkString(id)) => {
+                            pairs.push((key.to_string(), id.to_string()))
+                        }
+                        _ => {
+                            let e = ParseCommandError::InvalidArgument;
                             info!(reason = %e, ?resp_value, "invalid command");
                             return Err(e);
                         }
-                        match (&data[1], &data[2]) {
-                            (RespValue::BulkString(repl_id), RespValue::BulkString(offset)) => {
-                                let offset: i64 = offset.parse().map_err(|e| {
+                    }
+                }
+
+                Ok(Command::XRead {
+                    keys_and_ids: pairs,
+                    timeout,
+                })
+            }
+            "INCR" => {
+                if data.len() != 2 {
+                    let e = ParseCommandError::WrongNumberArguments;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                }
+                match &data[1] {
+                    RespValue::BulkString(key) => Ok(Command::Incr {
+                        key: key.to_string(),
+                    }),
+                    _ => {
+                        let e = ParseCommandError::InvalidArgument;
+                        info!(reason = %e, ?resp_value, "invalid command");
+                        Err(e)
+                    }
+                }
+            }
+            "MULTI" => Ok(Command::Multi),
+            "EXEC" => Ok(Command::Exec),
+            "DISCARD" => Ok(Command::Discard),
+            "INFO" => {
+                let mut categories = Vec::new();
+                for category in &data[1..] {
+                    match category {
+                        RespValue::BulkString(category) => {
+                            categories.push(category.clone());
+                        }
+                        _ => {
+                            let e = ParseCommandError::InvalidArgument;
+                            info!(reason = %e, ?resp_value, "invalid command");
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(Command::Info { categories })
+            }
+            "REPLCONF" => {
+                if data.len() != 3 {
+                    let e = ParseCommandError::WrongNumberArguments;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                }
+
+                let RespValue::BulkString(arg) = &data[1] else {
+                    let e = ParseCommandError::InvalidArgument;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                };
+
+                match arg.to_lowercase().as_str() {
+                    "listening-port" | "capa" => Ok(Command::ReplConf {
+                        replica_addr: None,
+                        tx: None,
+                    }),
+                    "getack" => Ok(Command::ReplConfGetAck),
+                    _ => {
+                        let e = ParseCommandError::InvalidArgument;
+                        info!(reason = %e, ?resp_value, "invalid command");
+                        Err(e)
+                    }
+                }
+            }
+            "PSYNC" => {
+                if data.len() != 3 {
+                    let e = ParseCommandError::WrongNumberArguments;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                }
+                match (&data[1], &data[2]) {
+                    (RespValue::BulkString(repl_id), RespValue::BulkString(offset)) => {
+                        let offset: i64 = offset.parse().map_err(|e| {
                                         let e2 = ParseCommandError::InvalidArgument;
                                 info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
                                             e2
                                     })?;
 
-                                let repl_id = if repl_id == "?" {
-                                    None
-                                } else {
-                                    Some(repl_id.clone())
-                                };
+                        let repl_id = if repl_id == "?" {
+                            None
+                        } else {
+                            Some(repl_id.clone())
+                        };
 
-                                Ok(Command::PSync {
-                                    repl_id,
-                                    offset,
-                                    replica_addr: None,
-                                })
-                            }
-                            _ => {
-                                let e = ParseCommandError::InvalidArgument;
-                                info!(reason = %e, ?resp_value, "invalid command");
-                                Err(e)
-                            }
-                        }
+                        Ok(Command::PSync {
+                            repl_id,
+                            offset,
+                            replica_addr: None,
+                        })
                     }
                     _ => {
-                        let e = ParseCommandError::UnknownCommand;
-                        info!(reason = %e, ?resp_value, "unknown command");
+                        let e = ParseCommandError::InvalidArgument;
+                        info!(reason = %e, ?resp_value, "invalid command");
                         Err(e)
                     }
                 }
-            } else {
-                let e = ParseCommandError::InvalidCommandName;
-                info!(reason = %e, ?resp_value, "invalid command");
+            }
+            "WAIT" => {
+                if data.len() != 3 {
+                    let e = ParseCommandError::WrongNumberArguments;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                }
+
+                let (RespValue::BulkString(num_replicas), RespValue::BulkString(timeout_ms)) =
+                    (&data[1], &data[2])
+                else {
+                    let e = ParseCommandError::InvalidArgument;
+                    info!(reason = %e, ?resp_value, "invalid command");
+                    return Err(e);
+                };
+
+                let num_replicas: usize = num_replicas.parse().map_err(|e| {
+                    let e2 = ParseCommandError::InvalidArgument;
+                    info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
+                    e2
+                })?;
+
+                let timeout_ms: u64 = timeout_ms.parse().map_err(|e| {
+                    let e2 = ParseCommandError::InvalidArgument;
+                    info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
+                    e2
+                })?;
+
+                let timeout = Duration::from_millis(timeout_ms);
+
+                Ok(Command::Wait {
+                    num_replicas,
+                    timeout,
+                })
+            }
+            _ => {
+                let e = ParseCommandError::UnknownCommand;
+                info!(reason = %e, ?resp_value, "unknown command");
                 Err(e)
             }
-        } else {
-            let e = ParseCommandError::InvalidRespData;
-            info!(reason = %e, ?resp_value, "invalid command");
-            Err(e)
         }
     }
 }

@@ -254,6 +254,22 @@ async fn client_responds_to_replconf_getack() {
     handle.await.unwrap();
 }
 
+#[tokio::test]
+async fn wait_command_works_with_zero_replicas() {
+    let port = setup().await;
+
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", port)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+
+    let data: i64 = redis::cmd("WAIT")
+        .arg("0")
+        .arg("60000")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, 0);
+}
+
 async fn handshake_with_client(listener: TcpListener) -> Connection {
     let (stream, _) = listener.accept().await.unwrap();
 
