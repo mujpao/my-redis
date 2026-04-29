@@ -46,64 +46,7 @@ async fn primary_responds_to_replication_handshake() {
 
     let handle = tokio::spawn(async move {
         let addr = format!("127.0.0.1:{}", port);
-        let stream = TcpStream::connect(addr).await.unwrap();
-
-        let mut conn = Connection::new(stream);
-
-        conn.write_value(&RespValue::Array(vec![RespValue::BulkString(
-            String::from("PING"),
-        )]))
-        .await
-        .unwrap();
-        let response = conn.read_value().await.unwrap();
-        assert_eq!(
-            response,
-            Some(RespValue::SimpleString(String::from("PONG")))
-        );
-
-        conn.write_value(&RespValue::Array(vec![
-            RespValue::BulkString(String::from("REPLCONF")),
-            RespValue::BulkString(String::from("listening-port")),
-            RespValue::BulkString(String::from("1234")),
-        ]))
-        .await
-        .unwrap();
-
-        let response = conn.read_value().await.unwrap();
-        assert_eq!(response, Some(RespValue::SimpleString(String::from("OK"))));
-
-        conn.write_value(&RespValue::Array(vec![
-            RespValue::BulkString(String::from("REPLCONF")),
-            RespValue::BulkString(String::from("capa")),
-            RespValue::BulkString(String::from("psync2")),
-        ]))
-        .await
-        .unwrap();
-
-        let response = conn.read_value().await.unwrap();
-        assert_eq!(response, Some(RespValue::SimpleString(String::from("OK"))));
-
-        conn.write_value(&RespValue::Array(vec![
-            RespValue::BulkString(String::from("PSYNC")),
-            RespValue::BulkString(String::from("?")),
-            RespValue::BulkString(String::from("-1")),
-        ]))
-        .await
-        .unwrap();
-
-        let response = conn.read_value().await.unwrap();
-
-        let Some(RespValue::SimpleString(s)) = response else {
-            panic!();
-        };
-
-        assert!(s.contains("FULLRESYNC"));
-
-        let empty_rdb_file_hex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
-        let rdb_data = hex::decode(empty_rdb_file_hex).unwrap();
-
-        let response = conn.read_value::<RdbData>().await.unwrap().unwrap();
-        assert_eq!(response.0, rdb_data);
+        handshake_with_primary(addr).await
     });
 
     handle.await.unwrap();
@@ -321,6 +264,8 @@ async fn wait_works_with_propagated_commands() {
 
     sleep(Duration::from_millis(300)).await;
 
+    let mut expected_bytes_processed = 0;
+
     let data: String = redis::cmd("SET")
         .arg("foo")
         .arg("bar")
@@ -328,6 +273,14 @@ async fn wait_works_with_propagated_commands() {
         .await
         .unwrap();
     assert_eq!(data, "OK");
+
+    let command = Command::Set {
+        key: "foo".into(),
+        value: "bar".into(),
+        expiry_duration: None,
+    };
+
+    expected_bytes_processed += command.size().unwrap();
 
     let data: i64 = redis::cmd("WAIT")
         .arg("3")
@@ -345,12 +298,20 @@ async fn wait_works_with_propagated_commands() {
         .unwrap();
     assert_eq!(data, "OK");
 
+    let command = Command::Set {
+        key: "foo2".into(),
+        value: "bar2".into(),
+        expiry_duration: None,
+    };
+
+    expected_bytes_processed += command.size().unwrap();
+
     let replicas_cloned = replicas.clone();
     let handle = tokio::spawn(async move {
         sleep(Duration::from_millis(100)).await;
 
         for mut replica in replicas_cloned {
-            replica.send_ack().await;
+            replica.send_ack(expected_bytes_processed).await;
         }
     });
 
@@ -372,12 +333,20 @@ async fn wait_works_with_propagated_commands() {
         .unwrap();
     assert_eq!(data, "OK");
 
+    let command = Command::Set {
+        key: "foo".into(),
+        value: "bar2".into(),
+        expiry_duration: None,
+    };
+
+    expected_bytes_processed += command.size().unwrap();
+
     let mut replicas_cloned = replicas.clone();
     let handle = tokio::spawn(async move {
         sleep(Duration::from_millis(100)).await;
-        replicas_cloned[0].send_ack().await;
-        replicas_cloned[1].send_ack().await;
-        replicas_cloned[2].send_ack().await;
+        replicas_cloned[0].send_ack(expected_bytes_processed).await;
+        replicas_cloned[1].send_ack(expected_bytes_processed).await;
+        replicas_cloned[2].send_ack(expected_bytes_processed).await;
     });
 
     let data: i64 = redis::cmd("WAIT")
@@ -398,13 +367,21 @@ async fn wait_works_with_propagated_commands() {
         .unwrap();
     assert_eq!(data, "OK");
 
+    let command = Command::Set {
+        key: "foo".into(),
+        value: "bar3".into(),
+        expiry_duration: None,
+    };
+
+    expected_bytes_processed += command.size().unwrap();
+
     let mut replicas_cloned = replicas.clone();
     let handle = tokio::spawn(async move {
         sleep(Duration::from_millis(100)).await;
-        replicas_cloned[0].send_ack().await;
-        replicas_cloned[1].send_ack().await;
-        replicas_cloned[2].send_ack().await;
-        replicas_cloned[3].send_ack().await;
+        replicas_cloned[0].send_ack(expected_bytes_processed).await;
+        replicas_cloned[1].send_ack(expected_bytes_processed).await;
+        replicas_cloned[2].send_ack(expected_bytes_processed).await;
+        replicas_cloned[3].send_ack(expected_bytes_processed).await;
     });
 
     let data: i64 = redis::cmd("WAIT")
@@ -416,6 +393,14 @@ async fn wait_works_with_propagated_commands() {
     assert_eq!(data, 4);
 
     handle.await.unwrap();
+
+    let data: String = redis::cmd("SET")
+        .arg("foo")
+        .arg("bar")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(data, "OK");
 
     let data: i64 = redis::cmd("WAIT")
         .arg("9")
@@ -433,10 +418,8 @@ struct FakeReplica {
 
 impl FakeReplica {
     async fn new(primary_port: u16) -> Self {
-        let stream = TcpStream::connect(format!("127.0.0.1:{}", primary_port))
-            .await
-            .unwrap();
-        let mut conn = Connection::new(stream);
+        let addr = format!("127.0.0.1:{}", primary_port);
+        let mut conn = handshake_with_primary(addr).await;
 
         let (tx, mut rx) = mpsc::channel(10);
 
@@ -457,11 +440,72 @@ impl FakeReplica {
         Self { tx }
     }
 
-    async fn send_ack(&mut self) {
-        let bytes = 0;
-
+    async fn send_ack(&mut self, bytes: usize) {
         self.tx.send(bytes).await.unwrap()
     }
+}
+
+async fn handshake_with_primary(addr: String) -> Connection {
+    let stream = TcpStream::connect(addr).await.unwrap();
+
+    let mut conn = Connection::new(stream);
+
+    conn.write_value(&RespValue::Array(vec![RespValue::BulkString(
+        String::from("PING"),
+    )]))
+    .await
+    .unwrap();
+    let response = conn.read_value().await.unwrap();
+    assert_eq!(
+        response,
+        Some(RespValue::SimpleString(String::from("PONG")))
+    );
+
+    conn.write_value(&RespValue::Array(vec![
+        RespValue::BulkString(String::from("REPLCONF")),
+        RespValue::BulkString(String::from("listening-port")),
+        RespValue::BulkString(String::from("1234")),
+    ]))
+    .await
+    .unwrap();
+
+    let response = conn.read_value().await.unwrap();
+    assert_eq!(response, Some(RespValue::SimpleString(String::from("OK"))));
+
+    conn.write_value(&RespValue::Array(vec![
+        RespValue::BulkString(String::from("REPLCONF")),
+        RespValue::BulkString(String::from("capa")),
+        RespValue::BulkString(String::from("psync2")),
+    ]))
+    .await
+    .unwrap();
+
+    let response = conn.read_value().await.unwrap();
+    assert_eq!(response, Some(RespValue::SimpleString(String::from("OK"))));
+
+    conn.write_value(&RespValue::Array(vec![
+        RespValue::BulkString(String::from("PSYNC")),
+        RespValue::BulkString(String::from("?")),
+        RespValue::BulkString(String::from("-1")),
+    ]))
+    .await
+    .unwrap();
+
+    let response = conn.read_value().await.unwrap();
+
+    let Some(RespValue::SimpleString(s)) = response else {
+        panic!();
+    };
+
+    assert!(s.contains("FULLRESYNC"));
+
+    let empty_rdb_file_hex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
+    let rdb_data = hex::decode(empty_rdb_file_hex).unwrap();
+
+    let response = conn.read_value::<RdbData>().await.unwrap().unwrap();
+    assert_eq!(response.0, rdb_data);
+
+    conn
 }
 
 async fn handshake_with_client(listener: TcpListener) -> Connection {

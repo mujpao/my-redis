@@ -20,6 +20,7 @@ pub enum ConnCommand {
     PropagateCommand {
         command: Command,
     },
+    SendGetAck,
 }
 
 /// Represents a connection between the redis instance and a client or replica instance
@@ -30,12 +31,14 @@ pub struct ClientConnection {
     command_tx: mpsc::Sender<(Command, oneshot::Sender<CommandResponse>)>,
     events_tx: mpsc::Sender<ConnCommand>,
     events_rx: mpsc::Receiver<ConnCommand>,
+    ack_tx: mpsc::Sender<(SocketAddr, usize)>,
 }
 
 impl ClientConnection {
     pub fn new(
         stream: TcpStream,
         command_tx: mpsc::Sender<(Command, oneshot::Sender<CommandResponse>)>,
+        ack_tx: mpsc::Sender<(SocketAddr, usize)>,
     ) -> Self {
         let connection = Connection::new(stream);
         let transaction_queue: Option<Vec<Command>> = None;
@@ -49,6 +52,7 @@ impl ClientConnection {
             command_tx,
             events_tx,
             events_rx,
+            ack_tx,
         }
     }
 
@@ -68,7 +72,7 @@ impl ClientConnection {
                                 continue;
                             }
 
-                            warn!("sending rdb file");
+                            info!("sending rdb file");
                             self.connection.write_rdb_data(&data).await?;
                         },
                         Some(ConnCommand::PropagateCommand {command}) => {
@@ -76,6 +80,14 @@ impl ClientConnection {
                                 self.connection.write_value(&resp).await?;
                             } else {
                                 warn!("unable to propagate command");
+                            }
+                        }
+                        Some(ConnCommand::SendGetAck) => {
+                            let command = Command::ReplConfGetAck;
+                            if let Ok(resp) = command.try_into() {
+                                self.connection.write_value(&resp).await?;
+                            } else {
+                                warn!("unable to send replconf getack");
                             }
                         }
                         None => {
@@ -137,6 +149,15 @@ impl ClientConnection {
                 return Ok(());
             }
         };
+
+        if let Command::Ack { offset } = command {
+            let addr = self.connection.get_client_addr()?;
+            return self
+                .ack_tx
+                .send((addr, offset))
+                .await
+                .map_err(|e| anyhow!("error sending ack: {}", e));
+        }
 
         match (&mut self.transaction_queue, command) {
             (Some(_), Command::Discard) => {
@@ -226,6 +247,7 @@ impl ClientConnection {
                             value
                         }
                     },
+                    CommandResponse::Wait(rx) => rx.await?,
                 };
 
                 self.connection.write_value(&to_send).await?;

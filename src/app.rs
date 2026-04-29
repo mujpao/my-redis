@@ -9,11 +9,12 @@ use rand::distr::{Alphanumeric, SampleString};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tracing::{Instrument, info, info_span, instrument, warn};
 
 type Map = HashMap<String, RedisDataType>;
@@ -22,12 +23,6 @@ enum RedisDataType {
     String(Box<(String, Option<Instant>)>),
     List(VecDeque<RespValue>),
     Stream(Box<Stream>),
-}
-
-#[derive(Debug)]
-pub enum Role {
-    Primary,
-    Replica { primary_addr: SocketAddr },
 }
 
 #[derive(Debug)]
@@ -43,11 +38,112 @@ struct XReadListener {
     last_seen_id: Option<String>,
 }
 
+fn count_up_to_date_replicas(
+    offsets: Arc<Mutex<HashMap<SocketAddr, usize>>>,
+    target_offset: usize,
+) -> usize {
+    let guard = offsets.lock().unwrap();
+
+    guard
+        .values()
+        .filter(|&&bytes_acknowledged| bytes_acknowledged >= target_offset)
+        .count()
+}
+
+#[derive(Debug)]
+struct WaitListener {
+    target_offset: usize,
+    num_required_acks: usize,
+    response_tx: Option<oneshot::Sender<usize>>,
+    expires_at: Instant,
+    offsets: Arc<Mutex<HashMap<SocketAddr, usize>>>,
+}
+
+impl WaitListener {
+    fn new(
+        target_offset: usize,
+        num_required_acks: usize,
+        tx: oneshot::Sender<RespValue>,
+        duration: Duration,
+        offsets: HashMap<SocketAddr, usize>,
+    ) -> Self {
+        let offsets = Arc::new(Mutex::new(offsets));
+
+        let (response_tx, response_rx) = oneshot::channel();
+        let offsets2 = Arc::clone(&offsets);
+
+        let expires_at = Instant::now() + duration;
+
+        tokio::spawn(async move {
+            // response_rx finishes if listener has received the
+            // needed number of acks
+            let num_acks = match timeout(duration, response_rx).await {
+                Ok(Ok(n)) => {
+                    info!("got {:?} on wait channel", n);
+                    n
+                }
+                e => {
+                    info!("timeout reached for wait, {:?}", e);
+
+                    count_up_to_date_replicas(offsets2, target_offset)
+                }
+            };
+
+            let _ = tx.send(RespValue::Integer(num_acks as i64));
+        });
+
+        Self {
+            target_offset,
+            num_required_acks,
+            response_tx: Some(response_tx),
+            expires_at,
+            offsets,
+        }
+    }
+
+    fn handle_ack(mut self, addr: SocketAddr, bytes_processed: usize) -> Option<Self> {
+        if self.expires_at < Instant::now() {
+            return None;
+        }
+
+        self.update_offset(addr, bytes_processed);
+
+        let num_up_to_date_replicas =
+            count_up_to_date_replicas(Arc::clone(&self.offsets), self.target_offset);
+
+        if num_up_to_date_replicas >= self.num_required_acks {
+            let response_tx = self.response_tx.take()?;
+            response_tx.send(num_up_to_date_replicas).ok()?;
+            None
+        } else {
+            Some(self)
+        }
+    }
+
+    fn update_offset(&self, addr: SocketAddr, bytes_processed: usize) {
+        let mut guard = self.offsets.lock().unwrap();
+        guard.insert(addr, bytes_processed);
+    }
+}
+
 #[derive(Debug)]
 pub enum CommandResponse {
     NonBlocking(RespValue),
     BlockingOneshot((oneshot::Receiver<RespValue>, Option<Duration>)),
     BlockingMpsc((mpsc::Receiver<RespValue>, Option<Duration>)),
+    Wait(oneshot::Receiver<RespValue>),
+}
+
+#[derive(Debug)]
+pub enum Role {
+    Primary,
+    Replica { primary_addr: SocketAddr },
+}
+
+#[derive(Debug)]
+pub struct ReplicaData {
+    tx: mpsc::Sender<ConnCommand>,
+    bytes_processed: usize,
 }
 
 #[instrument]
@@ -57,11 +153,14 @@ pub async fn run(listener: TcpListener, role: Role) -> anyhow::Result<()> {
     let addr = listener.local_addr()?;
 
     let (command_tx, command_rx) = mpsc::channel(100);
+    let (ack_tx, ack_rx) = mpsc::channel(100);
 
-    let mut app = App::new(addr, command_rx, role);
+    let mut app = App::new(addr, command_rx, ack_rx, role);
 
     tokio::spawn(async move {
-        accept_listeners(listener, command_tx).await.unwrap();
+        accept_listeners(listener, command_tx, ack_tx)
+            .await
+            .unwrap();
     });
 
     app.run().await
@@ -92,7 +191,7 @@ struct App {
     map: Map,
     blpop_listeners: HashMap<String, Vec<BLPopListener>>,
     xread_listeners: HashMap<String, VecDeque<XReadListener>>,
-    replica_connections: HashMap<SocketAddr, mpsc::Sender<ConnCommand>>,
+    wait_listeners: VecDeque<WaitListener>,
     command_rx: mpsc::Receiver<(Command, oneshot::Sender<CommandResponse>)>,
     events_tx: mpsc::Sender<AppEvent>,
     events_rx: mpsc::Receiver<AppEvent>,
@@ -100,12 +199,17 @@ struct App {
     addr: SocketAddr,
     replication_id: Option<String>,
     rdb_data: RdbData,
+    replica_connections: HashMap<SocketAddr, ReplicaData>,
+    // Number bytes of write commands processed by this instance
+    offset: usize,
+    ack_rx: mpsc::Receiver<(SocketAddr, usize)>,
 }
 
 impl App {
     fn new(
         addr: SocketAddr,
         command_rx: mpsc::Receiver<(Command, oneshot::Sender<CommandResponse>)>,
+        ack_rx: mpsc::Receiver<(SocketAddr, usize)>,
         role: Role,
     ) -> Self {
         let map = HashMap::new();
@@ -126,6 +230,7 @@ impl App {
             map,
             blpop_listeners,
             xread_listeners,
+            wait_listeners: VecDeque::new(),
             replica_connections,
             command_rx,
             events_tx,
@@ -134,6 +239,8 @@ impl App {
             addr,
             replication_id,
             rdb_data,
+            ack_rx,
+            offset: 0,
         }
     }
 
@@ -153,6 +260,7 @@ impl App {
         }
 
         loop {
+            // TODO fix formatting
             select![
                 maybe_command = self.command_rx.recv() => {
                     match maybe_command {
@@ -175,6 +283,9 @@ impl App {
 
                          },
                     }
+                }
+                Some(ack) = self.ack_rx.recv() => {
+                    self.handle_ack(ack.0, ack.1).await?;
                 }
             ];
         }
@@ -202,8 +313,9 @@ impl App {
                 offset,
                 replica_addr,
             } => {
-                if let Some(conn_tx) = self.replica_connections.get(&replica_addr) {
-                    conn_tx
+                if let Some(replica) = self.replica_connections.get(&replica_addr) {
+                    replica
+                        .tx
                         .send(ConnCommand::FullResync {
                             repl_id,
                             offset,
@@ -230,13 +342,20 @@ impl App {
         let response = self.execute_command(&command).await?;
 
         if command.is_write() {
-            for conn_tx in self.replica_connections.values() {
-                tracing::info!(command = ?command, "propagating command");
-                conn_tx
-                    .send(ConnCommand::PropagateCommand {
-                        command: command.clone(),
-                    })
-                    .await?;
+            match command.size() {
+                Ok(size) => {
+                    self.offset += size;
+                    for ReplicaData { tx, .. } in self.replica_connections.values() {
+                        tracing::info!(command = ?command, "propagating command");
+                        tx.send(ConnCommand::PropagateCommand {
+                            command: command.clone(),
+                        })
+                        .await?;
+                    }
+                }
+                Err(e) => {
+                    warn!(?e);
+                }
             }
         }
 
@@ -641,7 +760,13 @@ impl App {
             }
             Command::ReplConf { replica_addr, tx } => {
                 if let (Some(replica_addr), Some(tx)) = (replica_addr, tx) {
-                    self.replica_connections.insert(*replica_addr, tx.clone());
+                    self.replica_connections.insert(
+                        *replica_addr,
+                        ReplicaData {
+                            tx: tx.clone(),
+                            bytes_processed: 0,
+                        },
+                    );
                 } else {
                     warn!(?replica_addr, "got replconf without tx and/or replica_addr");
                 }
@@ -687,14 +812,58 @@ impl App {
                 }
             }
             Command::ReplConfGetAck => {
-                warn!("got ReplConfGetAck on primary");
+                warn!("got ReplConfGetAck in execute_command()");
 
                 CommandResponse::NonBlocking(RespValue::NullBulkString)
             }
-            Command::Wait { .. } => {
-                let num_replicas = self.replica_connections.len();
+            Command::Ack { .. } => {
+                warn!("got ack on primary");
 
-                CommandResponse::NonBlocking(RespValue::Integer(num_replicas as i64))
+                CommandResponse::NonBlocking(RespValue::NullBulkString)
+            }
+            Command::Wait {
+                num_replicas,
+                timeout,
+            } => {
+                let target_offset = self.offset;
+
+                let num_acknowledged_replicas = self
+                    .replica_connections
+                    .iter()
+                    .filter(|replica| replica.1.bytes_processed == target_offset)
+                    .count();
+                if num_acknowledged_replicas >= *num_replicas {
+                    return Ok(CommandResponse::NonBlocking(RespValue::Integer(
+                        num_acknowledged_replicas as i64,
+                    )));
+                }
+
+                let mut offsets = HashMap::new();
+                for (addr, replica) in &self.replica_connections {
+                    offsets.insert(*addr, replica.bytes_processed);
+                }
+
+                let (tx, rx) = oneshot::channel();
+
+                let listener =
+                    WaitListener::new(target_offset, *num_replicas, tx, *timeout, offsets);
+
+                self.wait_listeners.push_back(listener);
+
+                let replica_txs: Vec<_> = self
+                    .replica_connections
+                    .values()
+                    .map(|replica| replica.tx.clone())
+                    .collect();
+
+                tokio::spawn(async move {
+                    // TODO do this in parallel
+                    for tx in replica_txs {
+                        let _ = tx.send(ConnCommand::SendGetAck).await;
+                    }
+                });
+
+                CommandResponse::Wait(rx)
             }
         };
 
@@ -810,20 +979,53 @@ impl App {
         }
         Ok(())
     }
+
+    #[instrument(skip(self))]
+    async fn handle_ack(&mut self, addr: SocketAddr, bytes_processed: usize) -> anyhow::Result<()> {
+        if let Some(replica) = self.replica_connections.get_mut(&addr) {
+            replica.bytes_processed = bytes_processed;
+
+            info!(
+                "replica at {} processed {} bytes out of {}",
+                addr, replica.bytes_processed, self.offset
+            );
+        } else {
+            warn!("replica addr not in connections, {}", addr);
+        }
+
+        let mut new_listeners = VecDeque::new();
+
+        while !self.wait_listeners.is_empty() {
+            let listener = self
+                .wait_listeners
+                .pop_front()
+                .ok_or_else(|| anyhow!("listeners is empty"))?;
+
+            if let Some(listener) = listener.handle_ack(addr, bytes_processed) {
+                new_listeners.push_back(listener);
+            }
+        }
+
+        self.wait_listeners = new_listeners;
+
+        Ok(())
+    }
 }
 
 async fn accept_listeners(
     listener: TcpListener,
-    tx: mpsc::Sender<(Command, oneshot::Sender<CommandResponse>)>,
+    command_tx: mpsc::Sender<(Command, oneshot::Sender<CommandResponse>)>,
+    ack_tx: mpsc::Sender<(SocketAddr, usize)>,
 ) -> anyhow::Result<()> {
     loop {
-        let command_tx = tx.clone();
+        let command_tx = command_tx.clone();
+        let ack_tx = ack_tx.clone();
         let (stream, socket) = listener.accept().await?;
 
         tokio::spawn(
             async move {
                 info!("accepted new connection");
-                let mut client_connection = ClientConnection::new(stream, command_tx);
+                let mut client_connection = ClientConnection::new(stream, command_tx, ack_tx);
                 client_connection.run().await
             }
             .instrument(info_span!("client connection", addr = ?socket)),
@@ -865,7 +1067,7 @@ fn lpop(key: &String, count: Option<usize>, map: &mut Map) -> RespValue {
 }
 
 #[instrument]
-async fn perform_handshake_from_replica(
+pub async fn perform_handshake_from_replica(
     primary: SocketAddr,
     port: u16,
 ) -> anyhow::Result<Connection> {
@@ -948,7 +1150,7 @@ async fn perform_handshake_from_replica(
     Ok(conn)
 }
 
-async fn send_command_from_replica(
+pub async fn send_command_from_replica(
     command: RespValue,
     conn: &mut Connection,
 ) -> anyhow::Result<RespValue> {

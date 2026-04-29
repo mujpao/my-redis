@@ -15,6 +15,28 @@ pub enum RespValue {
     NullArray,
 }
 
+impl RespValue {
+    pub fn size(&self) -> usize {
+        match self {
+            RespValue::SimpleString(s) => 3 + s.len(),
+            RespValue::BulkString(s) => 5 + s.len().to_string().len() + s.len(),
+            RespValue::NullBulkString => 5,
+            RespValue::SimpleError(e) => 3 + e.len(),
+            RespValue::Integer(i) => 3 + i.to_string().len(),
+            RespValue::Array(a) => {
+                let mut length = 3 + a.len().to_string().len();
+
+                for element in a {
+                    length += element.size();
+                }
+
+                length
+            }
+            RespValue::NullArray => 5,
+        }
+    }
+}
+
 impl Frame for RespValue {
     fn parse(data: &mut Cursor<&[u8]>) -> Result<RespValue, ParseError> {
         if !data.has_remaining() {
@@ -160,6 +182,11 @@ impl TryFrom<Command> for RespValue {
                     ]))
                 }
             }
+            Command::ReplConfGetAck => Ok(RespValue::Array(vec![
+                RespValue::BulkString(String::from("REPLCONF")),
+                RespValue::BulkString(String::from("GETACK")),
+                RespValue::BulkString(String::from("*")),
+            ])),
             _ => Err(anyhow!("Respvalue from command not fully implemented")),
         }
     }
@@ -364,6 +391,16 @@ mod tests {
                 RespValue::BulkString(String::from("SET")),
                 RespValue::BulkString(String::from("foo")),
                 RespValue::BulkString(String::from("bar")),
+            ])
+        );
+
+        let command = Command::ReplConfGetAck;
+        assert_eq!(
+            RespValue::try_from(command).unwrap(),
+            RespValue::Array(vec![
+                RespValue::BulkString(String::from("REPLCONF")),
+                RespValue::BulkString(String::from("GETACK")),
+                RespValue::BulkString(String::from("*")),
             ])
         );
     }

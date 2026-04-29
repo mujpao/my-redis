@@ -84,6 +84,9 @@ pub enum Command {
         num_replicas: usize,
         timeout: Duration,
     },
+    Ack {
+        offset: usize,
+    },
 }
 
 impl Command {
@@ -98,10 +101,17 @@ impl Command {
             | Command::Info { .. }
             | Command::ReplConf { .. }
             | Command::PSync { .. }
-            | Command::Wait { .. } => false,
+            | Command::Wait { .. }
+            | Command::ReplConfGetAck
+            | Command::Ack { .. } => false,
             // TODO what about multi, exec, etc...
             _ => true,
         }
+    }
+
+    pub fn size(&self) -> anyhow::Result<usize> {
+        let value = RespValue::try_from(self.clone())?;
+        Ok(value.size())
     }
 }
 
@@ -612,6 +622,19 @@ impl TryFrom<RespValue> for Command {
                         tx: None,
                     }),
                     "getack" => Ok(Command::ReplConfGetAck),
+                    "ack" => {
+                        let RespValue::BulkString(arg) = &data[2] else {
+                            let e = ParseCommandError::InvalidArgument;
+                            info!(reason = %e, ?resp_value, "invalid command");
+                            return Err(e);
+                        };
+
+                        let offset: usize = arg.parse().map_err(|e| {
+                    let e2 = ParseCommandError::InvalidArgument;
+                    info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
+                    e2})?;
+                        Ok(Command::Ack { offset })
+                    }
                     _ => {
                         let e = ParseCommandError::InvalidArgument;
                         info!(reason = %e, ?resp_value, "invalid command");
