@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 use tracing::{Instrument, info, info_span, instrument, warn};
 
@@ -260,28 +261,27 @@ impl App {
         }
 
         loop {
-            // TODO fix formatting
             select![
                 maybe_command = self.command_rx.recv() => {
                     match maybe_command {
-                         Some((command, resp_tx))   => {
-                             self.process_command(command, resp_tx).await?;
-                          },
-                         None  => {
-                             return Err(anyhow!("command channel closed"));
+                        Some((command, resp_tx)) => {
+                            self.process_command(command, resp_tx).await?;
+                        },
+                        None  => {
+                            return Err(anyhow!("command channel closed"));
 
-                         },
+                        },
                     }
                 }
                 maybe_event = self.events_rx.recv() => {
                     match maybe_event {
-                         Some(event)   => {
-                    self.process_event(event).await?;
-                          },
-                         None  => {
-                             return Err(anyhow!("event channel closed"));
+                        Some(event) => {
+                            self.process_event(event).await?;
+                        },
+                        None  => {
+                            return Err(anyhow!("event channel closed"));
 
-                         },
+                        },
                     }
                 }
                 Some(ack) = self.ack_rx.recv() => {
@@ -857,10 +857,15 @@ impl App {
                     .collect();
 
                 tokio::spawn(async move {
-                    // TODO do this in parallel
+                    let mut set = JoinSet::new();
+
                     for tx in replica_txs {
-                        let _ = tx.send(ConnCommand::SendGetAck).await;
+                        set.spawn(async move {
+                            let _ = tx.send(ConnCommand::SendGetAck).await;
+                        });
                     }
+
+                    set.join_all().await;
                 });
 
                 CommandResponse::Wait(rx)

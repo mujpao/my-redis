@@ -66,30 +66,7 @@ impl ClientConnection {
                 }
                 maybe_event = self.events_rx.recv() => {
                     match maybe_event {
-                        Some(ConnCommand::FullResync { replica_addr, data,..}) => {
-                            if self.connection.get_client_addr()? != replica_addr {
-                                warn!(?replica_addr, "replica addr doesn't match");
-                                continue;
-                            }
-
-                            info!("sending rdb file");
-                            self.connection.write_rdb_data(&data).await?;
-                        },
-                        Some(ConnCommand::PropagateCommand {command}) => {
-                            if let Ok(resp) = command.try_into() {
-                                self.connection.write_value(&resp).await?;
-                            } else {
-                                warn!("unable to propagate command");
-                            }
-                        }
-                        Some(ConnCommand::SendGetAck) => {
-                            let command = Command::ReplConfGetAck;
-                            if let Ok(resp) = command.try_into() {
-                                self.connection.write_value(&resp).await?;
-                            } else {
-                                warn!("unable to send replconf getack");
-                            }
-                        }
+                        Some(e) => self.handle_event(e).await?,
                         None => {
                             return Err(anyhow!("event channel closed"));
                         },
@@ -97,6 +74,39 @@ impl ClientConnection {
                 }
             ];
         }
+    }
+
+    async fn handle_event(&mut self, event: ConnCommand) -> anyhow::Result<()> {
+        match event {
+            ConnCommand::FullResync {
+                replica_addr, data, ..
+            } => {
+                if self.connection.get_client_addr()? != replica_addr {
+                    warn!(?replica_addr, "replica addr doesn't match");
+                    return Ok(());
+                }
+
+                info!("sending rdb file");
+                self.connection.write_rdb_data(&data).await?;
+            }
+            ConnCommand::PropagateCommand { command } => {
+                if let Ok(resp) = command.try_into() {
+                    self.connection.write_value(&resp).await?;
+                } else {
+                    warn!("unable to propagate command");
+                }
+            }
+            ConnCommand::SendGetAck => {
+                let command = Command::ReplConfGetAck;
+                if let Ok(resp) = command.try_into() {
+                    self.connection.write_value(&resp).await?;
+                } else {
+                    warn!("unable to send replconf getack");
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn pre_process_command(&mut self, command: Command) -> Command {
