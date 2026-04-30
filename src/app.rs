@@ -896,7 +896,7 @@ impl App {
     }
 
     #[instrument(skip(self))]
-    async fn notify_xread_listeners(&mut self, key: &String) -> anyhow::Result<()> {
+    async fn notify_xread_listeners(&mut self, key: &str) -> anyhow::Result<()> {
         if let Some(mut listeners) = self.xread_listeners.remove(key) {
             let mut new_listeners = VecDeque::new();
 
@@ -942,13 +942,13 @@ impl App {
                 new_listeners.push_back(listener);
             }
 
-            self.xread_listeners.insert(key.clone(), new_listeners);
+            self.xread_listeners.insert(key.to_string(), new_listeners);
         }
         Ok(())
     }
 
     #[instrument(skip(self))]
-    fn notify_blpop_listeners(&mut self, key: &String) -> anyhow::Result<()> {
+    fn notify_blpop_listeners(&mut self, key: &str) -> anyhow::Result<()> {
         if let Some(mut listeners) = self.blpop_listeners.remove(key) {
             listeners = listeners
                 .into_iter()
@@ -966,7 +966,7 @@ impl App {
                         match list.pop_front() {
                             Some(elem) => {
                                 let to_send = RespValue::Array(vec![
-                                    RespValue::BulkString(key.clone()),
+                                    RespValue::BulkString(key.to_string()),
                                     elem,
                                 ]);
                                 let _ = listener.tx.send(to_send);
@@ -980,7 +980,7 @@ impl App {
                 })
                 .collect();
 
-            self.blpop_listeners.insert(key.clone(), listeners);
+            self.blpop_listeners.insert(key.to_string(), listeners);
         }
         Ok(())
     }
@@ -1038,7 +1038,7 @@ async fn accept_listeners(
     }
 }
 
-fn lpop(key: &String, count: Option<usize>, map: &mut Map) -> RespValue {
+fn lpop(key: &str, count: Option<usize>, map: &mut Map) -> RespValue {
     let mut count = count.unwrap_or(1);
 
     match map.get_mut(key) {
