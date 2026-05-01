@@ -1181,7 +1181,11 @@ async fn listen_for_propagated_commands(
             .await?
             .ok_or_else(|| anyhow!("no value read from connection"))?;
 
-        let command = command.try_into().map_err(|e| anyhow!("{}", e))?;
+        info!(?command, "got propagated resp value on connection",);
+
+        let command = command
+            .try_into()
+            .map_err(|e| anyhow!("error parsing command: {:?}", e))?;
 
         if let Command::ReplConfGetAck = command {
             let response = RespValue::Array(vec![

@@ -153,9 +153,7 @@ impl TryFrom<RespValue> for Command {
     #[instrument]
     fn try_from(resp_value: RespValue) -> Result<Self, Self::Error> {
         let RespValue::Array(ref data) = resp_value else {
-            let e = ParseCommandError::InvalidRespData;
-            info!(reason = %e, ?resp_value, "invalid command");
-            return Err(e);
+            return Err(ParseCommandError::InvalidRespData);
         };
 
         if data.is_empty() {
@@ -163,33 +161,25 @@ impl TryFrom<RespValue> for Command {
         }
 
         let RespValue::BulkString(command_name) = &data[0] else {
-            let e = ParseCommandError::InvalidCommandName;
-            info!(reason = %e, ?resp_value, "invalid command");
-            return Err(e);
+            return Err(ParseCommandError::InvalidCommandName);
         };
 
         match command_name.as_str().to_uppercase().as_str() {
             "PING" => Ok(Command::Ping),
             "ECHO" => {
                 if data.len() < 2 {
-                    let e = ParseCommandError::WrongNumberArguments;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::WrongNumberArguments);
                 }
 
                 if let RespValue::BulkString(message) = &data[1] {
                     Ok(Command::Echo(message.into()))
                 } else {
-                    let e = ParseCommandError::InvalidArgument;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    Err(e)
+                    Err(ParseCommandError::InvalidArgument)
                 }
             }
             "SET" => {
-                if data.len() < 3 {
-                    let e = ParseCommandError::WrongNumberArguments;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                if data.len() != 3 && data.len() != 5 {
+                    return Err(ParseCommandError::WrongNumberArguments);
                 }
                 let mut command = match (&data[1], &data[2]) {
                     (RespValue::BulkString(key), RespValue::BulkString(value)) => Command::Set {
@@ -197,30 +187,23 @@ impl TryFrom<RespValue> for Command {
                         value: value.to_string(),
                         expiry_duration: None,
                     },
-                    (_, _) => {
-                        let e = ParseCommandError::InvalidArgument;
-                        info!(reason = %e, ?resp_value, "invalid command");
-                        return Err(e);
+                    _ => {
+                        return Err(ParseCommandError::InvalidArgument);
                     }
                 };
 
                 if data.len() == 5 {
                     match (&data[3], &data[4]) {
                         (RespValue::BulkString(s), RespValue::BulkString(i)) => {
-                            let i: u64 = i.parse().map_err(|e| {
-                                            let e2 = ParseCommandError::InvalidArgument;
-                                info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
-                                            e2
-                                        })?;
+                            let i: u64 =
+                                i.parse().map_err(|_| ParseCommandError::InvalidArgument)?;
 
                             let units = s.as_str().to_uppercase();
                             let duration = match units.as_str() {
                                 "EX" => Duration::from_secs(i),
                                 "PX" => Duration::from_millis(i),
-                                d => {
-                                    let e = ParseCommandError::InvalidArgument;
-                                    info!(reason = %e, ?resp_value, unit=d, "invalid duration unit");
-                                    return Err(e);
+                                _ => {
+                                    return Err(ParseCommandError::InvalidArgument);
                                 }
                             };
 
@@ -231,15 +214,11 @@ impl TryFrom<RespValue> for Command {
                                     expiry_duration: Some(duration),
                                 }
                             } else {
-                                let e = ParseCommandError::InvalidArgument;
-                                info!(reason = %e, ?resp_value, "invalid command");
-                                return Err(e);
+                                return Err(ParseCommandError::InvalidArgument);
                             };
                         }
                         (_, _) => {
-                            let e = ParseCommandError::InvalidArgument;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
+                            return Err(ParseCommandError::InvalidArgument);
                         }
                     }
                 }
@@ -247,26 +226,18 @@ impl TryFrom<RespValue> for Command {
             }
             "GET" => {
                 if data.len() < 2 {
-                    let e = ParseCommandError::WrongNumberArguments;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::WrongNumberArguments);
                 }
                 match &data[1] {
                     RespValue::BulkString(key) => Ok(Command::Get {
                         key: key.to_string(),
                     }),
-                    _ => {
-                        let e = ParseCommandError::InvalidArgument;
-                        info!(reason = %e, ?resp_value, "invalid command");
-                        Err(e)
-                    }
+                    _ => Err(ParseCommandError::InvalidArgument),
                 }
             }
             "RPUSH" => {
                 if data.len() < 3 {
-                    let e = ParseCommandError::WrongNumberArguments;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::WrongNumberArguments);
                 }
 
                 match &data[1] {
@@ -274,18 +245,12 @@ impl TryFrom<RespValue> for Command {
                         key: key.to_string(),
                         elements: data[2..].to_vec(),
                     }),
-                    _ => {
-                        let e = ParseCommandError::InvalidArgument;
-                        info!(reason = %e, ?resp_value, "invalid command");
-                        Err(e)
-                    }
+                    _ => Err(ParseCommandError::InvalidArgument),
                 }
             }
             "LPUSH" => {
                 if data.len() < 3 {
-                    let e = ParseCommandError::WrongNumberArguments;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::WrongNumberArguments);
                 }
 
                 match &data[1] {
@@ -293,18 +258,12 @@ impl TryFrom<RespValue> for Command {
                         key: key.to_string(),
                         elements: data[2..].to_vec(),
                     }),
-                    _ => {
-                        let e = ParseCommandError::InvalidArgument;
-                        info!(reason = %e, ?resp_value, "invalid command");
-                        Err(e)
-                    }
+                    _ => Err(ParseCommandError::InvalidArgument),
                 }
             }
             "LRANGE" => {
                 if data.len() != 4 {
-                    let e = ParseCommandError::WrongNumberArguments;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::WrongNumberArguments);
                 }
 
                 match (&data[1], &data[2], &data[3]) {
@@ -313,17 +272,13 @@ impl TryFrom<RespValue> for Command {
                         RespValue::BulkString(start),
                         RespValue::BulkString(stop),
                     ) => {
-                        let start: i64 = start.parse().map_err(|e| {
-                                        let e2 = ParseCommandError::InvalidArgument;
-                                info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
-                                            e2
-                                    })?;
+                        let start: i64 = start
+                            .parse()
+                            .map_err(|_| ParseCommandError::InvalidArgument)?;
 
-                        let stop: i64 = stop.parse().map_err(|e| {
-                                        let e2 = ParseCommandError::InvalidArgument;
-                                info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
-                                            e2
-                                    })?;
+                        let stop: i64 = stop
+                            .parse()
+                            .map_err(|_| ParseCommandError::InvalidArgument)?;
 
                         Ok(Command::LRange {
                             key: key.to_string(),
@@ -331,18 +286,12 @@ impl TryFrom<RespValue> for Command {
                             stop,
                         })
                     }
-                    _ => {
-                        let e = ParseCommandError::InvalidArgument;
-                        info!(reason = %e, ?resp_value, "invalid command");
-                        Err(e)
-                    }
+                    _ => Err(ParseCommandError::InvalidArgument),
                 }
             }
             "LLEN" => {
                 if data.len() != 2 {
-                    let e = ParseCommandError::WrongNumberArguments;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::WrongNumberArguments);
                 }
                 match &data[1] {
                     RespValue::BulkString(key) => Ok(Command::LLen {
@@ -357,19 +306,14 @@ impl TryFrom<RespValue> for Command {
             }
             "LPOP" => {
                 if data.len() < 2 {
-                    let e = ParseCommandError::WrongNumberArguments;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::WrongNumberArguments);
                 }
 
                 let count = if data.len() > 2 {
                     match &data[2] {
                         RespValue::BulkString(s) => {
-                            let count: usize = s.parse().map_err(|e| {
-                                            let e2 = ParseCommandError::InvalidArgument;
-                                info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
-                                            e2
-                                        })?;
+                            let count: usize =
+                                s.parse().map_err(|_| ParseCommandError::InvalidArgument)?;
 
                             Some(count)
                         }
@@ -384,26 +328,17 @@ impl TryFrom<RespValue> for Command {
                         key: key.to_string(),
                         count,
                     }),
-                    _ => {
-                        let e = ParseCommandError::InvalidArgument;
-                        info!(reason = %e, ?resp_value, "invalid command");
-                        Err(e)
-                    }
+                    _ => Err(ParseCommandError::InvalidArgument),
                 }
             }
             "BLPOP" => {
                 if data.len() != 3 {
-                    let e = ParseCommandError::WrongNumberArguments;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::WrongNumberArguments);
                 }
                 match (&data[1], &data[2]) {
                     (RespValue::BulkString(key), RespValue::BulkString(s)) => {
-                        let timeout: f64 = s.parse().map_err(|e| {
-                                       let e2 = ParseCommandError::InvalidArgument;
-                                info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
-                                            e2
-                                    })?;
+                        let timeout: f64 =
+                            s.parse().map_err(|_| ParseCommandError::InvalidArgument)?;
 
                         let timeout = if timeout < 0.0 {
                             return Err(ParseCommandError::InvalidArgument);
@@ -419,35 +354,23 @@ impl TryFrom<RespValue> for Command {
                         })
                     }
 
-                    _ => {
-                        let e = ParseCommandError::InvalidArgument;
-                        info!(reason = %e, ?resp_value, "invalid command");
-                        Err(e)
-                    }
+                    _ => Err(ParseCommandError::InvalidArgument),
                 }
             }
             "TYPE" => {
                 if data.len() < 2 {
-                    let e = ParseCommandError::WrongNumberArguments;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::WrongNumberArguments);
                 }
                 match &data[1] {
                     RespValue::BulkString(key) => Ok(Command::Type {
                         key: key.to_string(),
                     }),
-                    _ => {
-                        let e = ParseCommandError::InvalidArgument;
-                        info!(reason = %e, ?resp_value, "invalid command");
-                        Err(e)
-                    }
+                    _ => Err(ParseCommandError::InvalidArgument),
                 }
             }
             "XADD" => {
                 if data.len() < 5 {
-                    let e = ParseCommandError::WrongNumberArguments;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::WrongNumberArguments);
                 }
                 match (&data[1], &data[2]) {
                     (RespValue::BulkString(key), RespValue::BulkString(id)) => {
@@ -462,9 +385,7 @@ impl TryFrom<RespValue> for Command {
                                     value_idx = field_idx + 1;
                                 }
                                 _ => {
-                                    let e = ParseCommandError::InvalidArgument;
-                                    info!(reason = %e, ?resp_value, "invalid command");
-                                    return Err(e);
+                                    return Err(ParseCommandError::InvalidArgument);
                                 }
                             }
                         }
@@ -474,18 +395,12 @@ impl TryFrom<RespValue> for Command {
                             pairs,
                         })
                     }
-                    _ => {
-                        let e = ParseCommandError::InvalidArgument;
-                        info!(reason = %e, ?resp_value, "invalid command");
-                        Err(e)
-                    }
+                    _ => Err(ParseCommandError::InvalidArgument),
                 }
             }
             "XRANGE" => {
                 if data.len() != 4 {
-                    let e = ParseCommandError::WrongNumberArguments;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::WrongNumberArguments);
                 }
                 match (&data[1], &data[2], &data[3]) {
                     (
@@ -497,18 +412,12 @@ impl TryFrom<RespValue> for Command {
                         start: start.to_string(),
                         end: end.to_string(),
                     }),
-                    _ => {
-                        let e = ParseCommandError::InvalidArgument;
-                        info!(reason = %e, ?resp_value, "invalid command");
-                        Err(e)
-                    }
+                    _ => Err(ParseCommandError::InvalidArgument),
                 }
             }
             "XREAD" => {
                 if data.len() < 4 {
-                    let e = ParseCommandError::WrongNumberArguments;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::WrongNumberArguments);
                 }
 
                 let (timeout, pairs_start_idx) = match &data[1] {
@@ -516,43 +425,30 @@ impl TryFrom<RespValue> for Command {
                         "STREAMS" => (None, 2),
                         "BLOCK" => {
                             if data.len() < 6 {
-                                let e = ParseCommandError::WrongNumberArguments;
-                                info!(reason = %e, ?resp_value, "invalid command");
-                                return Err(e);
+                                return Err(ParseCommandError::WrongNumberArguments);
                             }
 
                             if let RespValue::BulkString(timeout) = &data[2] {
-                                let timeout: u64 =
-                                                    timeout.parse().map_err(|e| {
-                                                        let e2 = ParseCommandError::InvalidArgument;
-                                info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
-                                            e2
-                                                    })?;
+                                let timeout: u64 = timeout
+                                    .parse()
+                                    .map_err(|_| ParseCommandError::InvalidArgument)?;
 
                                 (Some(timeout), 4)
                             } else {
-                                let e = ParseCommandError::InvalidArgument;
-                                info!(reason = %e, ?resp_value, "invalid command");
-                                return Err(e);
+                                return Err(ParseCommandError::InvalidArgument);
                             }
                         }
                         _ => {
-                            let e = ParseCommandError::InvalidArgument;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
+                            return Err(ParseCommandError::InvalidArgument);
                         }
                     },
                     _ => {
-                        let e = ParseCommandError::InvalidArgument;
-                        info!(reason = %e, ?resp_value, "invalid command");
-                        return Err(e);
+                        return Err(ParseCommandError::InvalidArgument);
                     }
                 };
 
                 if (data.len() - 2) % 2 != 0 {
-                    let e = ParseCommandError::WrongNumberArguments;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::WrongNumberArguments);
                 }
 
                 let mut pairs = vec![];
@@ -566,9 +462,7 @@ impl TryFrom<RespValue> for Command {
                             pairs.push((key.to_string(), id.to_string()))
                         }
                         _ => {
-                            let e = ParseCommandError::InvalidArgument;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
+                            return Err(ParseCommandError::InvalidArgument);
                         }
                     }
                 }
@@ -580,19 +474,13 @@ impl TryFrom<RespValue> for Command {
             }
             "INCR" => {
                 if data.len() != 2 {
-                    let e = ParseCommandError::WrongNumberArguments;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::WrongNumberArguments);
                 }
                 match &data[1] {
                     RespValue::BulkString(key) => Ok(Command::Incr {
                         key: key.to_string(),
                     }),
-                    _ => {
-                        let e = ParseCommandError::InvalidArgument;
-                        info!(reason = %e, ?resp_value, "invalid command");
-                        Err(e)
-                    }
+                    _ => Err(ParseCommandError::InvalidArgument),
                 }
             }
             "MULTI" => Ok(Command::Multi),
@@ -606,9 +494,7 @@ impl TryFrom<RespValue> for Command {
                             categories.push(category.clone());
                         }
                         _ => {
-                            let e = ParseCommandError::InvalidArgument;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
+                            return Err(ParseCommandError::InvalidArgument);
                         }
                     }
                 }
@@ -616,15 +502,11 @@ impl TryFrom<RespValue> for Command {
             }
             "REPLCONF" => {
                 if data.len() != 3 {
-                    let e = ParseCommandError::WrongNumberArguments;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::WrongNumberArguments);
                 }
 
                 let RespValue::BulkString(arg) = &data[1] else {
-                    let e = ParseCommandError::InvalidArgument;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::InvalidArgument);
                 };
 
                 match arg.to_lowercase().as_str() {
@@ -635,37 +517,26 @@ impl TryFrom<RespValue> for Command {
                     "getack" => Ok(Command::ReplConfGetAck),
                     "ack" => {
                         let RespValue::BulkString(arg) = &data[2] else {
-                            let e = ParseCommandError::InvalidArgument;
-                            info!(reason = %e, ?resp_value, "invalid command");
-                            return Err(e);
+                            return Err(ParseCommandError::InvalidArgument);
                         };
 
-                        let offset: usize = arg.parse().map_err(|e| {
-                    let e2 = ParseCommandError::InvalidArgument;
-                    info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
-                    e2})?;
+                        let offset: usize = arg
+                            .parse()
+                            .map_err(|_| ParseCommandError::InvalidArgument)?;
                         Ok(Command::Ack { offset })
                     }
-                    _ => {
-                        let e = ParseCommandError::InvalidArgument;
-                        info!(reason = %e, ?resp_value, "invalid command");
-                        Err(e)
-                    }
+                    _ => Err(ParseCommandError::InvalidArgument),
                 }
             }
             "PSYNC" => {
                 if data.len() != 3 {
-                    let e = ParseCommandError::WrongNumberArguments;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::WrongNumberArguments);
                 }
                 match (&data[1], &data[2]) {
                     (RespValue::BulkString(repl_id), RespValue::BulkString(offset)) => {
-                        let offset: i64 = offset.parse().map_err(|e| {
-                                        let e2 = ParseCommandError::InvalidArgument;
-                                info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
-                                            e2
-                                    })?;
+                        let offset: i64 = offset
+                            .parse()
+                            .map_err(|_| ParseCommandError::InvalidArgument)?;
 
                         let repl_id = if repl_id == "?" {
                             None
@@ -679,39 +550,27 @@ impl TryFrom<RespValue> for Command {
                             replica_addr: None,
                         })
                     }
-                    _ => {
-                        let e = ParseCommandError::InvalidArgument;
-                        info!(reason = %e, ?resp_value, "invalid command");
-                        Err(e)
-                    }
+                    _ => Err(ParseCommandError::InvalidArgument),
                 }
             }
             "WAIT" => {
                 if data.len() != 3 {
-                    let e = ParseCommandError::WrongNumberArguments;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::WrongNumberArguments);
                 }
 
                 let (RespValue::BulkString(num_replicas), RespValue::BulkString(timeout_ms)) =
                     (&data[1], &data[2])
                 else {
-                    let e = ParseCommandError::InvalidArgument;
-                    info!(reason = %e, ?resp_value, "invalid command");
-                    return Err(e);
+                    return Err(ParseCommandError::InvalidArgument);
                 };
 
-                let num_replicas: usize = num_replicas.parse().map_err(|e| {
-                    let e2 = ParseCommandError::InvalidArgument;
-                    info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
-                    e2
-                })?;
+                let num_replicas: usize = num_replicas
+                    .parse()
+                    .map_err(|_| ParseCommandError::InvalidArgument)?;
 
-                let timeout_ms: u64 = timeout_ms.parse().map_err(|e| {
-                    let e2 = ParseCommandError::InvalidArgument;
-                    info!(parsing_error = %e, reason = %e2, ?resp_value, "error parsing integer");
-                    e2
-                })?;
+                let timeout_ms: u64 = timeout_ms
+                    .parse()
+                    .map_err(|_| ParseCommandError::InvalidArgument)?;
 
                 let timeout = Duration::from_millis(timeout_ms);
 
@@ -720,11 +579,7 @@ impl TryFrom<RespValue> for Command {
                     timeout,
                 })
             }
-            _ => {
-                let e = ParseCommandError::UnknownCommand;
-                info!(reason = %e, ?resp_value, "unknown command");
-                Err(e)
-            }
+            _ => Err(ParseCommandError::UnknownCommand),
         }
     }
 }

@@ -8,7 +8,7 @@ use tokio::net::TcpStream;
 use tokio::select;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
-use tracing::{info, warn};
+use tracing::{info, instrument, warn};
 
 pub enum ConnCommand {
     FullResync {
@@ -147,12 +147,14 @@ impl ClientConnection {
         }
     }
 
+    #[instrument(skip(self), fields(?value))]
     async fn handle_resp_value(&mut self, value: RespValue) -> anyhow::Result<()> {
-        info!(?value, "got value on connection");
+        info!("got value on connection");
 
         let command = match Command::try_from(value) {
             Ok(command) => self.pre_process_command(command),
             Err(e) => {
+                info!("error parsing command {:?}", e);
                 let s = format!("{}", e);
                 let to_send = RespValue::SimpleError(s);
                 self.connection.write_value(&to_send).await?;
