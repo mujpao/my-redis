@@ -27,7 +27,6 @@ pub enum ConnCommand {
 pub struct ClientConnection {
     connection: Connection,
     transaction_queue: Option<Vec<Command>>,
-    client_is_replica: bool,
     command_tx: mpsc::Sender<(Command, oneshot::Sender<CommandResponse>)>,
     events_tx: mpsc::Sender<ConnCommand>,
     events_rx: mpsc::Receiver<ConnCommand>,
@@ -48,7 +47,6 @@ impl ClientConnection {
         Self {
             connection,
             transaction_queue,
-            client_is_replica: false,
             command_tx,
             events_tx,
             events_rx,
@@ -112,7 +110,6 @@ impl ClientConnection {
     fn pre_process_command(&mut self, command: Command) -> Command {
         match command {
             Command::ReplConf { .. } => {
-                self.client_is_replica = true;
                 let addr = match self.connection.get_client_addr() {
                     Ok(addr) => Some(addr),
                     Err(e) => {
@@ -128,7 +125,6 @@ impl ClientConnection {
             Command::PSync {
                 repl_id, offset, ..
             } => {
-                self.client_is_replica = true;
                 let addr = match self.connection.get_client_addr() {
                     Ok(addr) => Some(addr),
                     Err(e) => {
