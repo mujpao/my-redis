@@ -19,9 +19,10 @@ use tokio::time::{sleep, timeout};
 use tracing::{Instrument, info, info_span, instrument, warn};
 
 type Map = HashMap<String, RedisDataType>;
+type KeyValue = (String, Option<(Instant, oneshot::Sender<()>)>);
 
 enum RedisDataType {
-    String(Box<(String, Option<Instant>)>),
+    String(Box<KeyValue>),
     List(VecDeque<RespValue>),
     Stream(Box<Stream>),
 }
@@ -296,7 +297,7 @@ impl App {
         match event {
             AppEvent::KeyExpired { key } => {
                 if let Some(RedisDataType::String(b)) = self.map.get(&key)
-                    && let (_, Some(key_expires_at)) = **b
+                    && let (_, Some((key_expires_at, _))) = **b
                     && key_expires_at < Instant::now()
                 {
                     self.map.remove(&key);
@@ -391,25 +392,36 @@ impl App {
                 value,
                 expiry_duration,
             } => {
-                let expiry_time = expiry_duration.map(|duration| Instant::now() + duration);
-
-                self.map.insert(
-                    key.to_string(),
-                    RedisDataType::String(Box::new((value.to_string(), expiry_time))),
-                );
-
-                let tx_cloned = self.events_tx.clone();
-
-                if let Some(duration) = expiry_duration {
+                let expiry_data = if let Some(duration) = expiry_duration {
+                    let (cancel_tx, cancel_rx) = oneshot::channel();
                     let duration = *duration;
+                    let events_tx = self.events_tx.clone();
                     let key = key.clone();
+
                     tokio::spawn(async move {
-                        sleep(duration).await;
-                        tx_cloned.send(AppEvent::KeyExpired { key }).await?;
+                        select![
+                            _ = sleep(duration) => {
+                                events_tx
+                                .send(AppEvent::KeyExpired {
+                                    key,
+                                })
+                                .await?;
+                            }
+                            _ = cancel_rx => {}
+                        ];
 
                         Ok::<(), anyhow::Error>(())
                     });
-                }
+
+                    Some((Instant::now() + duration, cancel_tx))
+                } else {
+                    None
+                };
+
+                self.map.insert(
+                    key.to_string(),
+                    RedisDataType::String(Box::new((value.to_string(), expiry_data))),
+                );
 
                 let response = RespValue::SimpleString(String::from("OK"));
                 CommandResponse::NonBlocking(response)
@@ -662,7 +674,7 @@ impl App {
                             }
                         };
 
-                        self.add_xread_listeners(&pairs, tx, expires_at)?;
+                        self.add_xread_listeners(&pairs, tx, expires_at);
 
                         CommandResponse::BlockingMpsc((rx, duration))
                     } else {
@@ -877,10 +889,10 @@ impl App {
 
     fn add_xread_listeners(
         &mut self,
-        pairs: &Vec<(String, Option<String>)>,
+        pairs: &[(String, Option<String>)],
         tx: mpsc::Sender<RespValue>,
         expires_at: Option<Instant>,
-    ) -> anyhow::Result<()> {
+    ) {
         for (key, last_id) in pairs {
             let listener = XReadListener {
                 tx: tx.clone(),
@@ -891,8 +903,6 @@ impl App {
             let listeners = self.xread_listeners.entry(key.to_string()).or_default();
             listeners.push_back(listener);
         }
-
-        Ok(())
     }
 
     #[instrument(skip(self))]
