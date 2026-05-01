@@ -92,11 +92,13 @@ pub enum Command {
 impl Command {
     pub fn is_write(&self) -> bool {
         match self {
-            Command::Ping
-            | Command::Echo(_)
-            | Command::Get { .. }
+            Command::Get { .. }
             | Command::LRange { .. }
             | Command::LLen { .. }
+            | Command::XRange { .. }
+            | Command::XRead { .. }
+            | Command::Ping
+            | Command::Echo(_)
             | Command::Type { .. }
             | Command::Info { .. }
             | Command::ReplConf { .. }
@@ -104,8 +106,17 @@ impl Command {
             | Command::Wait { .. }
             | Command::ReplConfGetAck
             | Command::Ack { .. } => false,
-            // TODO what about multi, exec, etc...
-            _ => true,
+            Command::Set { .. }
+            | Command::RPush { .. }
+            | Command::LPush { .. }
+            | Command::LPop { .. }
+            | Command::BLPop { .. }
+            | Command::XAdd { .. }
+            | Command::Incr { .. }
+            | Command::Multi
+            | Command::Exec
+            | Command::Transaction { .. }
+            | Command::Discard => true,
         }
     }
 
