@@ -248,7 +248,7 @@ impl App {
 
     async fn run(&mut self) -> anyhow::Result<()> {
         if let Role::Replica { primary_addr } = self.role {
-            let conn = perform_handshake_from_replica(primary_addr, self.addr.port()).await?;
+            let conn = handshake_with_primary(primary_addr, self.addr.port()).await?;
 
             let events_tx = self.events_tx.clone();
             tokio::spawn(
@@ -1081,11 +1081,11 @@ fn lpop(key: &str, count: Option<usize>, map: &mut Map) -> RespValue {
     }
 }
 
+// Performs a handshake with the primary from a replica instance,
+// returning the `Connection`.
+// `port` is the replica port.
 #[instrument]
-pub async fn perform_handshake_from_replica(
-    primary: SocketAddr,
-    port: u16,
-) -> anyhow::Result<Connection> {
+pub async fn handshake_with_primary(primary: SocketAddr, port: u16) -> anyhow::Result<Connection> {
     let stream = TcpStream::connect(primary).await?;
     let mut conn = Connection::new(stream);
     let result = send_command_from_replica(

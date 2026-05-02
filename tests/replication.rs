@@ -1,13 +1,12 @@
 use crate::common::{setup, setup_replica};
+use codecrafters_redis::app::handshake_with_primary;
 use codecrafters_redis::command::Command;
 use codecrafters_redis::connection::Connection;
-use codecrafters_redis::frame::rdb::RdbData;
 use codecrafters_redis::frame::resp::RespValue;
 use rand::distr::Alphanumeric;
 use rand::distr::SampleString;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
@@ -48,7 +47,9 @@ async fn primary_responds_to_replication_handshake() {
 
     let handle = tokio::spawn(async move {
         let addr = format!("127.0.0.1:{}", port);
-        handshake_with_primary(addr).await
+        handshake_with_primary(addr.parse().unwrap(), 1234)
+            .await
+            .unwrap();
     });
 
     handle.await.unwrap();
@@ -421,7 +422,9 @@ struct FakeReplica {
 impl FakeReplica {
     async fn new(primary_port: u16) -> Self {
         let addr = format!("127.0.0.1:{}", primary_port);
-        let mut conn = handshake_with_primary(addr).await;
+        let mut conn = handshake_with_primary(addr.parse().unwrap(), 1234)
+            .await
+            .unwrap();
 
         let (tx, mut rx) = mpsc::channel(10);
 
@@ -445,68 +448,6 @@ impl FakeReplica {
     async fn send_ack(&mut self, bytes: usize) {
         self.tx.send(bytes).await.unwrap()
     }
-}
-
-async fn handshake_with_primary(addr: String) -> Connection {
-    let stream = TcpStream::connect(addr).await.unwrap();
-
-    let mut conn = Connection::new(stream);
-
-    conn.write_value(&RespValue::Array(vec![RespValue::BulkString(
-        String::from("PING"),
-    )]))
-    .await
-    .unwrap();
-    let response = conn.read_value().await.unwrap();
-    assert_eq!(
-        response,
-        Some(RespValue::SimpleString(String::from("PONG")))
-    );
-
-    conn.write_value(&RespValue::Array(vec![
-        RespValue::BulkString(String::from("REPLCONF")),
-        RespValue::BulkString(String::from("listening-port")),
-        RespValue::BulkString(String::from("1234")),
-    ]))
-    .await
-    .unwrap();
-
-    let response = conn.read_value().await.unwrap();
-    assert_eq!(response, Some(RespValue::SimpleString(String::from("OK"))));
-
-    conn.write_value(&RespValue::Array(vec![
-        RespValue::BulkString(String::from("REPLCONF")),
-        RespValue::BulkString(String::from("capa")),
-        RespValue::BulkString(String::from("psync2")),
-    ]))
-    .await
-    .unwrap();
-
-    let response = conn.read_value().await.unwrap();
-    assert_eq!(response, Some(RespValue::SimpleString(String::from("OK"))));
-
-    conn.write_value(&RespValue::Array(vec![
-        RespValue::BulkString(String::from("PSYNC")),
-        RespValue::BulkString(String::from("?")),
-        RespValue::BulkString(String::from("-1")),
-    ]))
-    .await
-    .unwrap();
-
-    let response = conn.read_value().await.unwrap();
-
-    let Some(RespValue::SimpleString(s)) = response else {
-        panic!();
-    };
-
-    assert!(s.contains("FULLRESYNC"));
-
-    let rdb_data = hex::decode(EMPTY_RDB_FILE_HEX).unwrap();
-
-    let response = conn.read_value::<RdbData>().await.unwrap().unwrap();
-    assert_eq!(response.0, rdb_data);
-
-    conn
 }
 
 async fn handshake_with_client(listener: TcpListener) -> Connection {
