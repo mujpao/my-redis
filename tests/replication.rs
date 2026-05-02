@@ -13,6 +13,8 @@ use tokio::time::sleep;
 
 mod common;
 
+const EMPTY_RDB_FILE_HEX: &str = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
+
 #[tokio::test]
 async fn info_replication_works() {
     let port = setup().await;
@@ -499,8 +501,7 @@ async fn handshake_with_primary(addr: String) -> Connection {
 
     assert!(s.contains("FULLRESYNC"));
 
-    let empty_rdb_file_hex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
-    let rdb_data = hex::decode(empty_rdb_file_hex).unwrap();
+    let rdb_data = hex::decode(EMPTY_RDB_FILE_HEX).unwrap();
 
     let response = conn.read_value::<RdbData>().await.unwrap().unwrap();
     assert_eq!(response.0, rdb_data);
@@ -545,8 +546,7 @@ async fn handshake_with_client(listener: TcpListener) -> Connection {
     let response = RespValue::SimpleString(data);
     conn.write_value(&response).await.unwrap();
 
-    let empty_rdb_file_hex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
-    let rdb_data = hex::decode(empty_rdb_file_hex).unwrap();
+    let rdb_data = hex::decode(EMPTY_RDB_FILE_HEX).unwrap();
     conn.write_rdb_data(&rdb_data).await.unwrap();
 
     conn
