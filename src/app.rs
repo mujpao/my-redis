@@ -9,13 +9,12 @@ use rand::distr::{Alphanumeric, SampleString};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 use tracing::{Instrument, info, info_span, instrument, warn};
 
 type Map = HashMap<String, RedisDataType>;
@@ -40,92 +39,14 @@ struct XReadListener {
     last_seen_id: Option<String>,
 }
 
-fn count_up_to_date_replicas(
-    offsets: Arc<Mutex<HashMap<SocketAddr, usize>>>,
-    target_offset: usize,
-) -> usize {
-    let guard = offsets.lock().unwrap();
-
-    guard
-        .values()
-        .filter(|&&bytes_acknowledged| bytes_acknowledged >= target_offset)
-        .count()
-}
-
 #[derive(Debug)]
 struct WaitListener {
     target_offset: usize,
     num_required_acks: usize,
-    response_tx: Option<oneshot::Sender<usize>>,
+    response_tx: Option<oneshot::Sender<RespValue>>,
     expires_at: Instant,
-    offsets: Arc<Mutex<HashMap<SocketAddr, usize>>>,
-}
-
-impl WaitListener {
-    fn new(
-        target_offset: usize,
-        num_required_acks: usize,
-        tx: oneshot::Sender<RespValue>,
-        duration: Duration,
-        offsets: HashMap<SocketAddr, usize>,
-    ) -> Self {
-        let offsets = Arc::new(Mutex::new(offsets));
-
-        let (response_tx, response_rx) = oneshot::channel();
-        let offsets2 = Arc::clone(&offsets);
-
-        let expires_at = Instant::now() + duration;
-
-        tokio::spawn(async move {
-            // response_rx finishes if listener has received the
-            // needed number of acks
-            let num_acks = match timeout(duration, response_rx).await {
-                Ok(Ok(n)) => {
-                    info!("got {:?} on wait channel", n);
-                    n
-                }
-                e => {
-                    info!("timeout reached for wait, {:?}", e);
-
-                    count_up_to_date_replicas(offsets2, target_offset)
-                }
-            };
-
-            let _ = tx.send(RespValue::Integer(num_acks as i64));
-        });
-
-        Self {
-            target_offset,
-            num_required_acks,
-            response_tx: Some(response_tx),
-            expires_at,
-            offsets,
-        }
-    }
-
-    fn handle_ack(mut self, addr: SocketAddr, bytes_processed: usize) -> Option<Self> {
-        if self.expires_at < Instant::now() {
-            return None;
-        }
-
-        self.update_offset(addr, bytes_processed);
-
-        let num_up_to_date_replicas =
-            count_up_to_date_replicas(Arc::clone(&self.offsets), self.target_offset);
-
-        if num_up_to_date_replicas >= self.num_required_acks {
-            let response_tx = self.response_tx.take()?;
-            response_tx.send(num_up_to_date_replicas).ok()?;
-            None
-        } else {
-            Some(self)
-        }
-    }
-
-    fn update_offset(&self, addr: SocketAddr, bytes_processed: usize) {
-        let mut guard = self.offsets.lock().unwrap();
-        guard.insert(addr, bytes_processed);
-    }
+    /// Dropping `_cancel_tx` cancels the wait listener's timer
+    _cancel_tx: oneshot::Sender<()>,
 }
 
 #[derive(Debug)]
@@ -187,6 +108,7 @@ enum AppEvent {
     GotPropagatedCommand {
         command: Command,
     },
+    WaitTimeout,
 }
 
 struct App {
@@ -244,6 +166,13 @@ impl App {
             ack_rx,
             offset: 0,
         }
+    }
+
+    fn count_up_to_date_replicas(&self, target_offset: usize) -> usize {
+        self.replica_connections
+            .values()
+            .filter(|replica| replica.bytes_processed >= target_offset)
+            .count()
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {
@@ -330,6 +259,32 @@ impl App {
             }
             AppEvent::GotPropagatedCommand { command } => {
                 self.process_propagated_command(command).await?;
+            }
+            AppEvent::WaitTimeout => {
+                let mut new_listeners = VecDeque::new();
+
+                while !self.wait_listeners.is_empty() {
+                    let mut listener = self
+                        .wait_listeners
+                        .pop_front()
+                        .ok_or_else(|| anyhow!("listeners is empty"))?;
+
+                    if listener.expires_at < Instant::now() {
+                        let num_up_to_date_replicas =
+                            self.count_up_to_date_replicas(listener.target_offset);
+                        let response_tx = listener
+                            .response_tx
+                            .take()
+                            .ok_or_else(|| anyhow!("unable to take response tx"))?;
+                        response_tx
+                            .send(RespValue::Integer(num_up_to_date_replicas as i64))
+                            .map_err(|e| anyhow!("unable to send wait response: {:?}", e))?;
+                    } else {
+                        new_listeners.push_back(listener);
+                    }
+                }
+
+                self.wait_listeners = new_listeners;
             }
         }
         Ok(())
@@ -850,15 +805,18 @@ impl App {
                     )));
                 }
 
-                let mut offsets = HashMap::new();
-                for (addr, replica) in &self.replica_connections {
-                    offsets.insert(*addr, replica.bytes_processed);
-                }
+                let (response_tx, response_rx) = oneshot::channel();
+                let (cancel_tx, cancel_rx) = oneshot::channel();
 
-                let (tx, rx) = oneshot::channel();
+                let expires_at = Instant::now() + *timeout;
 
-                let listener =
-                    WaitListener::new(target_offset, *num_replicas, tx, *timeout, offsets);
+                let listener = WaitListener {
+                    target_offset,
+                    num_required_acks: *num_replicas,
+                    response_tx: Some(response_tx),
+                    expires_at,
+                    _cancel_tx: cancel_tx,
+                };
 
                 self.wait_listeners.push_back(listener);
 
@@ -880,7 +838,25 @@ impl App {
                     set.join_all().await;
                 });
 
-                CommandResponse::Wait(rx)
+                let events_tx = self.events_tx.clone();
+
+                let timeout = *timeout;
+
+                tokio::spawn(async move {
+                    select![
+                        _ = sleep(timeout) => {
+                            events_tx
+                            .send(AppEvent::WaitTimeout)
+                            .await?;
+                        }
+                        _ = cancel_rx => {
+                        }
+                    ];
+
+                    Ok::<(), anyhow::Error>(())
+                });
+
+                CommandResponse::Wait(response_rx)
             }
         };
 
@@ -1011,12 +987,22 @@ impl App {
         let mut new_listeners = VecDeque::new();
 
         while !self.wait_listeners.is_empty() {
-            let listener = self
+            let mut listener = self
                 .wait_listeners
                 .pop_front()
                 .ok_or_else(|| anyhow!("listeners is empty"))?;
 
-            if let Some(listener) = listener.handle_ack(addr, bytes_processed) {
+            let num_up_to_date_replicas = self.count_up_to_date_replicas(listener.target_offset);
+
+            if num_up_to_date_replicas >= listener.num_required_acks {
+                let response_tx = listener
+                    .response_tx
+                    .take()
+                    .ok_or_else(|| anyhow!("unable to take response tx"))?;
+                response_tx
+                    .send(RespValue::Integer(num_up_to_date_replicas as i64))
+                    .map_err(|e| anyhow!("unable to send wait response: {:?}", e))?;
+            } else {
                 new_listeners.push_back(listener);
             }
         }
